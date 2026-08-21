@@ -1,0 +1,15 @@
+# Ambiente virtuale
+.venv/
+venv/
+
+# Cache Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# File PyCharm
+.idea/
+
+# Certificati e chiavi generati dalla demo (output, non sorgente)
+certs/*.pem
+!certs/.gitkeep

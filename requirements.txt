@@ -1,0 +1,8 @@
+# Dipendenze del prototipo di e-voting (WP4)
+# Unica dipendenza esterna: la libreria crittografica standard di fatto in
+# ambito Python. Fornisce RSA, X.509, hashing e firme; noi vi costruiamo
+# sopra la logica del protocollo (chi certifica chi, ruoli, Key Usage).
+cryptography>=42.0
+
+# Solo per eseguire i test.
+pytest>=8.0
