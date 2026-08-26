@@ -1,21 +1,11 @@
 """
-Benchmark delle prestazioni della CA, per la sezione WP4 ("Mostrare anche le
-prestazioni ottenute con la sperimentazione, come il costo computazionale
-delle operazioni crittografiche, la dimensione dei messaggi scambiati, la
-latenza delle operazioni di verifica") — cfr. traccia ufficiale del project
-work.
+Benchmark della CA per WP4 (costo computazionale, dimensione messaggi,
+latenza di verifica — richiesti dalla traccia).
 
-Misura:
-    - costo di generazione di una coppia RSA-2048 (operazione ripetuta per
-      ogni soggetto certificato: IdP, BS, ciascun commissario);
-    - costo di emissione di un certificato (firma della CA);
-    - costo di verifica di un certificato (lato client/elettore, eseguita
-      potenzialmente molte volte durante la verifica universale);
-    - dimensione su filo di un certificato (PEM e DER), rilevante per il
-      calcolo della dimensione del manifest che li include.
+Misura: generazione chiave RSA-2048, emissione certificato, verifica
+certificato, dimensione PEM/DER di un certificato.
 
-Uso:
-    PYTHONPATH=. python3 benchmarks/bench_ca.py --iterations 200
+Uso: PYTHONPATH=. python3 benchmarks/bench_ca.py --iterations 200
 """
 from __future__ import annotations
 
@@ -57,13 +47,12 @@ def timed_ms(fn, iterations: int) -> list[float]:
 def run_benchmarks(iterations: int) -> None:
     ca = UniversityCA(organization_name="Universita Benchmark")
 
-    # 1. Generazione chiave RSA-2048 (indipendente dalla CA, ma è il costo
-    #    sostenuto da ciascun soggetto - IdP, BS, ogni commissario - prima
-    #    di richiedere la certificazione).
+    # 1. Keygen: è il costo che ogni soggetto paga prima di chiedere un
+    #    certificato, indipendente dalla CA.
     keygen_samples = timed_ms(generate_rsa_keypair, iterations)
 
-    # 2. Emissione certificato (lato CA): chiave già generata a parte per
-    #    isolare il costo della sola firma X.509, non del keygen.
+    # 2. Emissione (lato CA): chiavi già pronte, per isolare il costo
+    #    della sola firma X.509 dal keygen.
     pending_keys = [generate_rsa_keypair() for _ in range(iterations)]
 
     def issue_one(idx_box=[0]):
@@ -77,15 +66,12 @@ def run_benchmarks(iterations: int) -> None:
 
     issuance_samples = timed_ms(issue_one, iterations)
 
-    # 3. Verifica certificato (lato elettore/osservatore, ripetuta per ogni
-    #    certificato incontrato durante la verifica universale: IdP, BS,
-    #    ciascun commissario).
+    # 3. Verifica: la fa un osservatore per ogni certificato che incontra.
     sample_cert = ca.issue_certificate("verify-target.ateneo.it", EntityRole.BS_SIGNING).certificate
     verification_samples = timed_ms(lambda: ca.verify_certificate(sample_cert), iterations)
 
-    # 4. Dimensione del certificato (rilevante per il calcolo della
-    #    dimensione totale del manifest che include n=5 certificati
-    #    commissario + 2 certificati server).
+    # 4. Dimensione, utile per stimare quanto pesa il manifest con tutti
+    #    i certificati dentro.
     pem_size = len(sample_cert.public_bytes(serialization.Encoding.PEM))
     der_size = len(sample_cert.public_bytes(serialization.Encoding.DER))
 

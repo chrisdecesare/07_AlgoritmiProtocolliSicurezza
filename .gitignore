@@ -13,3 +13,5 @@ __pycache__/
 # Certificati e chiavi generati dalla demo (output, non sorgente)
 certs/*.pem
 !certs/.gitkeep
+# Report generato, non sorgente
+07_APS.pdf

@@ -1,41 +1,25 @@
 """
-CA universitaria — simulazione minimale della PKI preesistente assunta in
-07_APS_1 §2.3 ("PKI universitaria preesistente").
+CA universitaria — simula la PKI di Ateneo che il documento dà per
+scontata (§2.3).
 
-Aderenza al materiale del corso (slide 06_Key_Distribution):
-    - Un certificato è (chiave pubblica + identificatore del proprietario +
-      firma digitale della CA), come da scheda "Public Key Certificates".
-    - Il processo di certificazione segue i 6 passi della scheda
-      "PKI – Certification": (1) il soggetto genera la coppia di chiavi,
-      (2) chiede la certificazione di (subject_ID, public_key), (3) la CA
-      AUTENTICA il soggetto verificando che l'ID gli appartenga, (4) la CA
-      firma (subject_ID, public_key), (5) allega la firma, (6) restituisce
-      il certificato. I passi 1-2 sono modellati in `src/ca/csr.py`; il
-      passo 3 è discusso in `issue_certificate` (vedi nota sul punto di
-      autenticazione); i passi 4-6 sono qui.
-    - La verifica soddisfa i 4 "Requirements" della slide omonima:
-      leggibilità di nome+chiave, autenticità (firma CA), esclusività di
-      emissione, validità temporale. Vedi `verify_certificate`.
+Segue i 6 passi di "PKI – Certification" (slide 06): 1-2 stanno in
+`csr.py` (il soggetto genera la coppia e manda la CSR), 3 è
+l'autenticazione fatta in `issue_certificate_from_csr`, 4-6 sono qui,
+condivisi dai due percorsi di emissione. Le estensioni vengono dai
+profili di `profiles.py`, i certificati sono tracciati in `store.py`
+(index.txt + serial), la revoca e la CRL sono in `crl.py`.
 
-Scope dichiarato (semplificazioni rispetto alle slide, tutte consapevoli):
-    - Una sola CA di Ateneo, self-signed: le slide trattano catene e
-      gerarchie di CA ("PKI – Certificate Chains", "CA Hierarchies"), qui
-      non necessarie perché il documento assume "una CA di Ateneo" singola.
-    - Nessuna CRL/OCSP: le slide dedicano due schede alla revoca
-      ("PKI – Revocation", "Certificate Revocation List"), ma nel contesto
-      di una singola elezione la finestra di validità è così breve che la
-      revoca non è operativamente rilevante. Esclusione consapevole, non
-      per omissione — da dichiarare così in WP4.
+Fuori scope, di proposito: gerarchia root/intermedia (il documento
+assume una sola CA — `pathlen:0` sulla root lo rende un vincolo
+verificabile, non solo una dichiarazione) e OCSP (discusso in crl.py).
 
-Questo modulo NON rappresenta una scelta di design originale del protocollo:
-implementa un'assunzione di fiducia che WP2 dà per acquisita. Il suo unico
-scopo è rendere eseguibile il prototipo, fornendo certificati verificabili
-a IdP, Ballot Server e commissari.
+Questo modulo non è una scelta di design del protocollo: implementa
+un'assunzione di fiducia che il documento dà per acquisita (F.1).
 """
 from __future__ import annotations
 
 import datetime
-import enum
+import pathlib
 from dataclasses import dataclass
 
 from cryptography import x509
@@ -45,28 +29,24 @@ from cryptography.hazmat.primitives.asymmetric.rsa import (
     RSAPrivateKey,
     RSAPublicKey,
 )
-from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
+from cryptography.x509.oid import NameOID
 
+from src.ca.crl import (
+    DEFAULT_CRL_VALIDITY,
+    build_crl,
+    crl_distribution_points,
+    is_revoked,
+)
+from src.ca.csr import csr_proves_key_possession
+from src.ca.profiles import EntityRole, ExtensionProfile, profile_for_role, V3_CA
+from src.ca.store import CertificateStore
 from src.common.keys import generate_rsa_keypair
 
 ONE_DAY = datetime.timedelta(days=1)
 
-
-class EntityRole(enum.Enum):
-    """
-    Ruoli previsti dal modello (07_APS_1 §2.3, §2.4) per cui la CA emette
-    certificati. Ogni ruolo determina Key Usage / Extended Key Usage
-    differenti: non tutti gli attori hanno bisogno delle stesse capacità
-    crittografiche, e concedere più permessi del necessario violerebbe il
-    principio di least privilege che il resto del protocollo rispetta
-    (vedi separazione IdP/BS nel documento).
-    """
-
-    IDP_TLS = "idp_tls"                # canale autenticato elettore <-> IdP
-    IDP_TOKEN_SIGNING = "idp_signing"  # pkIdP_BS, firma cieca del token
-    BS_TLS = "bs_tls"                  # canale autenticato elettore <-> BS
-    BS_SIGNING = "bs_signing"          # pkBS-server, firma ricevute/teste BB
-    COMMISSIONER = "commissioner"      # firma manifest + cifratura share Shamir
+# EntityRole viveva qui prima di finire in profiles.py insieme ai
+# profili; lo riesporto per non rompere chi lo importa da qui.
+__all__ = ["EntityRole", "IssuedCertificate", "UniversityCA", "verify_certificate_with_crl"]
 
 
 @dataclass(frozen=True)
@@ -74,7 +54,7 @@ class IssuedCertificate:
     """Coppia (certificato, chiave privata del soggetto) restituita alla CA."""
 
     certificate: x509.Certificate
-    private_key: RSAPrivateKey
+    private_key: RSAPrivateKey | None
 
     def certificate_pem(self) -> bytes:
         from cryptography.hazmat.primitives import serialization
@@ -84,21 +64,33 @@ class IssuedCertificate:
 
 class UniversityCA:
     """
-    CA di Ateneo, self-signed, che emette certificati leaf per gli attori
-    del sistema di voto.
+    CA di Ateneo, self-signed: emette i certificati finali per gli attori
+    del sistema di voto e gestisce la revoca.
 
-    Nota sulla cerimonia: nel mondo reale la chiave privata della root
-    andrebbe generata e custodita offline (analogamente alla cerimonia
-    descritta in 07_APS_1 §2.4.1 per skAE). Nel prototipo la teniamo in
-    memoria per semplicità implementativa; questa è una semplificazione
-    dichiarata, non una proprietà di sicurezza del protocollo.
+    Nella realtà la chiave privata della root andrebbe generata offline e
+    tenuta al sicuro (come consiglia il Lab 4). Qui resta in memoria per
+    semplicità — è una scorciatoia del prototipo, non qualcosa che il
+    protocollo richiede.
     """
 
     ROOT_VALIDITY = 365 * ONE_DAY          # vita della root, non della singola elezione
     LEAF_VALIDITY = 30 * ONE_DAY           # commisurata alla durata di una elezione
 
-    def __init__(self, organization_name: str = "Universita degli Studi - Ateneo"):
+    def __init__(
+        self,
+        organization_name: str = "Universita degli Studi - Ateneo",
+        crl_url: str | None = None,
+        store_directory: pathlib.Path | None = None,
+    ):
+        """
+        `crl_url`, se dato, finisce scritto in ogni certificato emesso
+        (estensione `crlDistributionPoints`) così chi verifica sa dove
+        cercare la CRL. `store_directory`, se data, scrive index.txt /
+        serial / crlnumber su disco; altrimenti restano in memoria.
+        """
         self._organization_name = organization_name
+        self._crl_url = crl_url
+        self._store = CertificateStore(store_directory)
         self._private_key: RSAPrivateKey = generate_rsa_keypair()
         self._certificate: x509.Certificate = self._self_sign_root()
 
@@ -107,6 +99,10 @@ class UniversityCA:
     # ------------------------------------------------------------------ #
 
     def _self_sign_root(self) -> x509.Certificate:
+        """Certificato di root, self-signed, profilo v3_ca. Il serial è
+        casuale e non passa dal contatore di `store.py`: nel Lab la root
+        si crea con `openssl req -x509`, non con `openssl ca`, quindi il
+        contatore resta dedicato a ciò che la CA emette per altri."""
         subject = issuer = x509.Name(
             [
                 x509.NameAttribute(NameOID.COUNTRY_NAME, "IT"),
@@ -124,26 +120,8 @@ class UniversityCA:
             .serial_number(x509.random_serial_number())
             .not_valid_before(now - ONE_DAY)  # margine per clock skew
             .not_valid_after(now + self.ROOT_VALIDITY)
-            .add_extension(
-                # CA:true, nessuna intermedia consentita (path_length=0):
-                # scelta coerente con "una sola CA di Ateneo" del documento.
-                x509.BasicConstraints(ca=True, path_length=0),
-                critical=True,
-            )
-            .add_extension(
-                x509.KeyUsage(
-                    digital_signature=True,
-                    key_cert_sign=True,
-                    crl_sign=False,  # nessuna CRL: scelta di scope dichiarata
-                    content_commitment=False,
-                    key_encipherment=False,
-                    data_encipherment=False,
-                    key_agreement=False,
-                    encipher_only=False,
-                    decipher_only=False,
-                ),
-                critical=True,
-            )
+            .add_extension(V3_CA.basic_constraints, critical=True)
+            .add_extension(V3_CA.key_usage, critical=True)
             .add_extension(
                 x509.SubjectKeyIdentifier.from_public_key(self._private_key.public_key()),
                 critical=False,
@@ -159,71 +137,119 @@ class UniversityCA:
     def public_key(self) -> RSAPublicKey:
         return self._private_key.public_key()
 
+    @property
+    def organization_name(self) -> str:
+        return self._organization_name
+
+    @property
+    def store(self) -> CertificateStore:
+        """Database dei certificati emessi (`index.txt` + `serial`)."""
+        return self._store
+
     # ------------------------------------------------------------------ #
-    # Emissione certificati leaf
+    # Emissione certificati finali — logica condivisa
     # ------------------------------------------------------------------ #
 
-    def _key_usage_for_role(self, role: EntityRole) -> x509.KeyUsage:
-        """
-        Ogni ruolo riceve solo le capacità crittografiche che gli servono
-        nel protocollo (least privilege a livello di certificato, non solo
-        a livello di attore):
+    def _build_leaf_certificate(
+        self,
+        subject: x509.Name,
+        public_key: RSAPublicKey,
+        profile: ExtensionProfile,
+        validity: datetime.timedelta,
+    ) -> x509.Certificate:
+        """Passi 4-6 di "PKI – Certification": firma, allega, restituisce.
+        Le estensioni arrivano tutte dal `profile`, non sono decise qui.
+        Il certificato viene anche registrato in index.txt — è questo che
+        lo rende revocabile in seguito."""
+        now = datetime.datetime.now(datetime.timezone.utc)
 
-        - IDP_TLS / BS_TLS: digital_signature + key_encipherment, tipiche
-          di un certificato TLS server (handshake autenticato).
-        - IDP_TOKEN_SIGNING / BS_SIGNING: solo digital_signature — sono
-          chiavi single-purpose per firma (token, ricevute, teste BB),
-          coerentemente con la motivazione di isolamento del rischio
-          data in 07_APS_1 §2.4.2 per pkIdP_BS.
-        - COMMISSIONER: digital_signature (firma del manifest, firma
-          persistente skAE_sig) + key_encipherment (destinatario della
-          cifratura ibrida delle share Shamir, §2.4.1). Il documento
-          stesso riusa qui il certificato di Ateneo per entrambi gli
-          scopi: è una semplificazione ereditata dalla specifica, non
-          introdotta da questa implementazione.
-        """
-        if role in (EntityRole.IDP_TLS, EntityRole.BS_TLS):
-            return x509.KeyUsage(
-                digital_signature=True,
-                key_encipherment=True,
-                content_commitment=False,
-                data_encipherment=False,
-                key_agreement=False,
-                key_cert_sign=False,
-                crl_sign=False,
-                encipher_only=False,
-                decipher_only=False,
+        builder = (
+            x509.CertificateBuilder()
+            .subject_name(subject)
+            .issuer_name(self._certificate.subject)
+            .public_key(public_key)
+            .serial_number(self._store.next_serial())
+            .not_valid_before(now - ONE_DAY)
+            .not_valid_after(now + validity)
+            .add_extension(profile.basic_constraints, critical=True)
+            .add_extension(profile.key_usage, critical=True)
+            .add_extension(
+                x509.SubjectKeyIdentifier.from_public_key(public_key),
+                critical=False,
             )
-        if role in (EntityRole.IDP_TOKEN_SIGNING, EntityRole.BS_SIGNING):
-            return x509.KeyUsage(
-                digital_signature=True,
-                content_commitment=True,  # non-repudiation: firme su token/ricevute/teste
-                key_encipherment=False,
-                data_encipherment=False,
-                key_agreement=False,
-                key_cert_sign=False,
-                crl_sign=False,
-                encipher_only=False,
-                decipher_only=False,
+            .add_extension(
+                x509.AuthorityKeyIdentifier.from_issuer_public_key(self.public_key),
+                critical=False,
             )
-        if role is EntityRole.COMMISSIONER:
-            return x509.KeyUsage(
-                digital_signature=True,
-                content_commitment=True,
-                key_encipherment=True,
-                data_encipherment=False,
-                key_agreement=False,
-                key_cert_sign=False,
-                crl_sign=False,
-                encipher_only=False,
-                decipher_only=False,
-            )
-        raise ValueError(f"Ruolo non riconosciuto: {role}")
+        )
 
-    def _extended_key_usage_for_role(self, role: EntityRole) -> x509.ExtendedKeyUsage | None:
-        if role in (EntityRole.IDP_TLS, EntityRole.BS_TLS):
-            return x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH])
-        return None  # firma/commissario: EKU non applicabile, KeyUsage basta
+        if profile.extended_key_usage is not None:
+            builder = builder.add_extension(profile.extended_key_usage, critical=False)
+
+        if self._crl_url is not None:
+            builder = builder.add_extension(
+                crl_distribution_points(self._crl_url), critical=False
+            )
+
+        certificate = builder.sign(self._private_key, hashes.SHA256())
+        self._store.record(certificate)
+        return certificate
+
+    def _require_authenticated(self, subject_label: str, subject_authenticated: bool) -> None:
+        if not subject_authenticated:
+            # Passo 3 delle slide: senza autenticazione la CA non firma.
+            # Firmare comunque vorrebbe dire certificare un legame
+            # (ID, chiave) mai verificato — e con questo va a farsi
+            # benedire la fiducia su cui si regge tutta la PKI.
+            raise PermissionError(
+                f"Soggetto '{subject_label}' non autenticato: la CA non emette "
+                f"certificati per identità non verificate (PKI-Certification, passo 3)."
+            )
+
+    # ------------------------------------------------------------------ #
+    # Emissione — percorso raccomandato (CSR)
+    # ------------------------------------------------------------------ #
+
+    def issue_certificate_from_csr(
+        self,
+        csr: x509.CertificateSigningRequest,
+        role: EntityRole,
+        validity: datetime.timedelta | None = None,
+        subject_authenticated: bool = True,
+    ) -> x509.Certificate:
+        """
+        Il percorso di emissione realistico, quello che il Lab 4 consiglia
+        per terze parti: il soggetto genera la coppia e la CSR da solo con
+        `csr.create_csr`, la CA non vede mai la chiave privata. Qui
+        autentico il soggetto e controllo che la CSR provi il possesso
+        della chiave (altrimenti chiunque potrebbe chiedere un certificato
+        per la chiave pubblica di qualcun altro), poi firmo con
+        `_build_leaf_certificate`.
+        """
+        common_name = csr.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value
+        self._require_authenticated(common_name, subject_authenticated)
+
+        if not csr_proves_key_possession(csr):
+            raise ValueError(
+                f"CSR per '{common_name}' non valida: la firma non dimostra "
+                f"il possesso della chiave privata corrispondente."
+            )
+
+        csr_organization = csr.subject.get_attributes_for_oid(NameOID.ORGANIZATION_NAME)
+        if not csr_organization or csr_organization[0].value != self._organization_name:
+            raise ValueError(
+                f"CSR per '{common_name}' rifiutata: organizzazione dichiarata "
+                f"non corrisponde a questa CA ('{self._organization_name}')."
+            )
+
+        validity = validity or self.LEAF_VALIDITY
+        return self._build_leaf_certificate(
+            csr.subject, csr.public_key(), profile_for_role(role), validity
+        )
+
+    # ------------------------------------------------------------------ #
+    # Emissione — scorciatoia di prototipo (chiave pubblica nuda)
+    # ------------------------------------------------------------------ #
 
     def issue_certificate(
         self,
@@ -235,38 +261,15 @@ class UniversityCA:
         subject_authenticated: bool = True,
     ) -> IssuedCertificate:
         """
-        Emette un certificato leaf per un soggetto (IdP, BS, commissario),
-        seguendo i 6 passi di "PKI – Certification" (slide 06):
-
-            (1-2) il soggetto genera la coppia e chiede la certificazione:
-                  se `public_key` è fornita, questi passi sono già avvenuti
-                  altrove (vedi src/ca/csr.py); se è None, per comodità di
-                  test la CA genera qui la coppia e restituisce anche la
-                  privata — scorciatoia di prototipo, MAI accettabile in un
-                  deployment reale (la CA non deve mai vedere la privata).
-            (3)   la CA AUTENTICA il soggetto: verifica che l'ID gli
-                  appartenga davvero. Nel prototipo questo controllo è
-                  simulato dal flag `subject_authenticated`; in un sistema
-                  reale qui avverrebbe la verifica dell'identità (es. il
-                  soggetto si presenta di persona alla segreteria, o esibisce
-                  credenziali istituzionali). Se il soggetto non è
-                  autenticato la CA rifiuta di emettere — è il passo che
-                  distingue una CA da un semplice "oracolo di firma".
-            (4-6) la CA firma (subject_ID, public_key), allega la firma e
-                  restituisce il certificato: parte finale di questo metodo.
-
-        Il DN segue lo schema mostrato nelle slide (CN/O/OU/C).
+        Scorciatoia tenuta per compatibilità con test, demo e benchmark
+        esistenti — per codice nuovo usare `issue_certificate_from_csr`.
+        Qui NON c'è nessuna proof-of-possession: se passi `public_key` la
+        CA la certifica fidandosi e basta; se la ometti, la CA genera lei
+        stessa la coppia e ti ridà anche la privata, il che va bene per
+        un test ma sarebbe inaccettabile in un deployment vero (la CA non
+        deve mai maneggiare la chiave privata di qualcun altro).
         """
-        if not subject_authenticated:
-            # Passo 3 delle slide: senza autenticazione dell'ID del soggetto
-            # la CA non emette. Firmare comunque significherebbe certificare
-            # un legame (ID, chiave) non verificato, vanificando la fiducia
-            # su cui l'intera PKI si regge ("The certification process is
-            # based on trust", slide "PKI - CAs").
-            raise PermissionError(
-                f"Soggetto '{common_name}' non autenticato: la CA non emette "
-                f"certificati per identità non verificate (PKI-Certification, passo 3)."
-            )
+        self._require_authenticated(common_name, subject_authenticated)
 
         subject_private_key: RSAPrivateKey | None = None
         if public_key is None:
@@ -283,38 +286,55 @@ class UniversityCA:
             )
         name_attributes.append(x509.NameAttribute(NameOID.COMMON_NAME, common_name))
         subject = x509.Name(name_attributes)
-        now = datetime.datetime.now(datetime.timezone.utc)
+
         validity = validity or self.LEAF_VALIDITY
-
-        builder = (
-            x509.CertificateBuilder()
-            .subject_name(subject)
-            .issuer_name(self._certificate.subject)
-            .public_key(public_key)
-            .serial_number(x509.random_serial_number())
-            .not_valid_before(now - ONE_DAY)
-            .not_valid_after(now + validity)
-            .add_extension(
-                x509.BasicConstraints(ca=False, path_length=None),
-                critical=True,
-            )
-            .add_extension(self._key_usage_for_role(role), critical=True)
-            .add_extension(
-                x509.SubjectKeyIdentifier.from_public_key(public_key),
-                critical=False,
-            )
-            .add_extension(
-                x509.AuthorityKeyIdentifier.from_issuer_public_key(self.public_key),
-                critical=False,
-            )
+        certificate = self._build_leaf_certificate(
+            subject, public_key, profile_for_role(role), validity
         )
-
-        eku = self._extended_key_usage_for_role(role)
-        if eku is not None:
-            builder = builder.add_extension(eku, critical=False)
-
-        certificate = builder.sign(self._private_key, hashes.SHA256())
         return IssuedCertificate(certificate=certificate, private_key=subject_private_key)
+
+    # ------------------------------------------------------------------ #
+    # Revoca e CRL — Lab 4
+    # ------------------------------------------------------------------ #
+
+    def revoke_certificate(
+        self, certificate: x509.Certificate, when: datetime.datetime | None = None
+    ) -> None:
+        """
+        Revoca un certificato (`openssl ca -revoke`): marca la riga in
+        index.txt come `R`. Non basta da sola — diventa visibile a terzi
+        solo quando `current_crl()` la rigenera e la pubblica, per questo
+        il metodo non ritorna niente: ha solo aggiornato lo stato interno.
+
+        Nel nostro caso è usata a urne chiuse, per revocare la chiave di
+        firma dei token dell'IdP (§2.4.2).
+        """
+        if certificate.issuer != self._certificate.subject:
+            raise ValueError(
+                "questa CA non ha emesso il certificato indicato e non può revocarlo"
+            )
+        self._store.revoke(certificate.serial_number, when)
+
+    def current_crl(
+        self,
+        now: datetime.datetime | None = None,
+        validity: datetime.timedelta = DEFAULT_CRL_VALIDITY,
+    ) -> x509.CertificateRevocationList:
+        """
+        Emette la CRL corrente (`openssl ca -gencrl`). Va bene chiamarla
+        anche senza nulla da revocare: una CRL vuota e firmata dice
+        comunque qualcosa ("nessun certificato revocato al momento"),
+        mentre l'assenza di CRL non dice nulla. `validity` decide ogni
+        quanto la CA si impegna a ripubblicarla (`next_update`).
+        """
+        return build_crl(
+            issuer_name=self._certificate.subject,
+            signing_key=self._private_key,
+            revoked_entries=self._store.revoked,
+            crl_number=self._store.next_crl_number(),
+            now=now,
+            validity=validity,
+        )
 
     # ------------------------------------------------------------------ #
     # Verifica
@@ -322,36 +342,21 @@ class UniversityCA:
 
     def verify_certificate(self, certificate: x509.Certificate) -> bool:
         """
-        Verifica un certificato secondo i 4 "Requirements" della slide 06
-        (scheda "Requirements"). Chiunque (elettore, osservatore) esegue
-        questo controllo usando solo la chiave pubblica della CA distribuita
-        nel manifest — nessun segreto è richiesto (verificabilità universale,
-        §3.5.2). I quattro requisiti:
+        I 4 "Requirements" della slide 06 più la revoca del Lab 4:
 
-            R1. "Any participant can read a certificate to determine the name
-                and public key of the certificate's owner" — garantito dal
-                fatto che subject e public_key sono campi leggibili in chiaro
-                del certificato (non serve codice qui: è una proprietà del
-                formato X.509, verificabile da chiunque via cert.subject /
-                cert.public_key()).
-            R2. "Any participant can verify that the certificate originated
-                from the CA and is not counterfeit" — controllo della firma
-                della CA sotto (RSA hash-and-sign, slide 05): si ricalcola
-                l'hash del tbsCertificate e si verifica la firma con la
-                chiave pubblica della CA. Se il certificato è contraffatto o
-                emesso da un'altra CA, la verifica fallisce.
-            R3. "Only the CA can create and update certificates" — non è un
-                controllo lato verificatore ma una proprietà garantita da
-                R2: senza la chiave privata della CA nessuno può produrre una
-                firma che superi R2. La verifica di R2 fa quindi rispettare
-                R3 di riflesso.
-            R4. "Any participant can verify the time validity of the
-                certificate" — controllo not_valid_before / not_valid_after
-                sotto.
+            R1. nome e chiave pubblica leggibili in chiaro — gratis, è il
+                formato X.509 stesso (cert.subject / cert.public_key()).
+            R2. il certificato viene davvero dalla CA ed è autentico —
+                verifico la firma.
+            R3. solo la CA può creare/aggiornare certificati — non è un
+                controllo a parte, è una conseguenza di R2: senza la
+                privata della CA nessuno produce una firma valida.
+            R4. validità temporale — controllo le date.
 
-        Restituisce True solo se R2 e R4 sono soddisfatti (R1 e R3 sono
-        strutturali). Il match issuer==subject-della-CA è un pre-filtro che
-        rende esplicito R2 prima ancora della verifica crittografica.
+        Più R5, la revoca: qui guardo direttamente `index.txt` perché
+        questo è il controllo lato CA, che il database ce l'ha. Chi è
+        fuori usa `verify_certificate_with_crl`, che non serve stato
+        interno.
         """
         now = datetime.datetime.now(datetime.timezone.utc)
 
@@ -363,8 +368,8 @@ class UniversityCA:
         if certificate.issuer != self._certificate.subject:
             return False
 
-        # R2 (crittografico) — la firma deve verificare con la chiave della CA.
-        # Questo è ciò che rende R3 effettivo: senza skCA nessuno la produce.
+        # R2 crittografico: la firma deve verificare con la chiave della CA
+        # (è questo che rende vero R3, senza skCA nessuno la falsifica).
         try:
             self.public_key.verify(
                 certificate.signature,
@@ -375,4 +380,58 @@ class UniversityCA:
         except Exception:
             return False
 
+        # R5 — revoca (Lab 4)
+        if self._store.is_revoked(certificate.serial_number):
+            return False
+
         return True
+
+
+def verify_certificate_with_crl(
+    certificate: x509.Certificate,
+    ca_certificate: x509.Certificate,
+    crl: x509.CertificateRevocationList | None = None,
+    now: datetime.datetime | None = None,
+) -> bool:
+    """
+    Verifica che chiunque può fare con i soli artefatti pubblici —
+    certificato, certificato della CA, CRL — senza toccare lo stato
+    interno della CA. È l'equivalente di
+    `openssl verify -CAfile ca.cert.pem <cert>` più la lettura della CRL;
+    è quello che conta per la verificabilità universale (§3.5.2), dato
+    che un osservatore esterno non ha accesso a `index.txt`.
+
+    `crl=None` vuol dire "non disponibile", non "nessuna revoca": in quel
+    caso torno solo autenticità e validità temporale, e chi chiama deve
+    sapere che sullo stato di revoca non so dire nulla. Stesso trattamento
+    per una CRL scaduta.
+    """
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+
+    if not (certificate.not_valid_before_utc <= now <= certificate.not_valid_after_utc):
+        return False
+
+    if certificate.issuer != ca_certificate.subject:
+        return False
+
+    ca_public_key = ca_certificate.public_key()
+    try:
+        ca_public_key.verify(
+            certificate.signature,
+            certificate.tbs_certificate_bytes,
+            padding.PKCS1v15(),
+            certificate.signature_hash_algorithm,
+        )
+    except Exception:
+        return False
+
+    if crl is not None:
+        # una CRL non autentica è peggio di niente: potrebbe essere stata
+        # sostituita apposta per nascondere una revoca
+        if not crl.is_signature_valid(ca_public_key):
+            return False
+        if crl.next_update_utc is not None and crl.next_update_utc >= now:
+            if is_revoked(crl, certificate):
+                return False
+
+    return True

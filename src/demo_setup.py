@@ -1,22 +1,12 @@
 """
-Demo della Fase 0 (Setup pre-elezione) — 07_APS_1 §2.4.
+Demo della Fase 0 (Setup pre-elezione, §2.4).
 
-Questo script mostra la CA universitaria al lavoro: emette i certificati per
-tutti gli attori del sistema di voto, li verifica, li salva su disco in
-formato PEM e stampa un riepilogo leggibile. È il modo più diretto per
-"vedere cosa fa" la CA senza leggere il codice.
+Fa vedere la CA al lavoro: emette i certificati di tutti gli attori
+(IdP: TLS + firma; BS: TLS + firma; 5 commissari), li verifica, li salva
+in PEM e stampa un riepilogo. Il modo più veloce per capire cosa fa la CA
+senza leggersi root_ca.py.
 
-Attori certificati (coerente con 07_APS_1 §2.3 e l'esempio (t,n)=(3,5)):
-    - IdP: un certificato TLS (canale con l'elettore) + uno di firma
-      (chiave usata per il token).
-    - Ballot Server: un certificato TLS + uno di firma (ricevute e teste BB).
-    - 5 commissari: un certificato ciascuno (firma manifest + ricezione
-      delle share Shamir).
-
-Uso:
-    PYTHONPATH=. python3 -m src.demo_setup
-oppure:
-    PYTHONPATH=. python3 src/demo_setup.py
+Uso: PYTHONPATH=. python3 -m src.demo_setup
 """
 from __future__ import annotations
 

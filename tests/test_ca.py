@@ -1,8 +1,6 @@
 """
-Test della CA universitaria: copre esattamente le emissioni richieste dal
-setup pre-elezione descritto in 07_APS_1 §2.4 (IdP, BS, n=5 commissari) e
-verifica sia il caso di successo sia i casi di rigetto (certificato di
-un'altra CA, certificato scaduto).
+Test della CA: emissioni del setup pre-elezione (§2.4 — IdP, BS, 5
+commissari), casi di successo e di rigetto (altra CA, non autenticato).
 """
 import datetime
 
