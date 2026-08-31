@@ -71,10 +71,114 @@ resistenza alla coercizione avanzata (§2.9).
 | CA — database `index.txt`/`serial` e revoca/CRL (§2.4.2) | ✅ Fatto | `src/ca/store.py`, `crl.py` — test in `test_crl.py` |
 | Helper condivisi (hash, firma, password salting) | ✅ Fatto | `src/common/` |
 | IdP (auth §2.5.1, token §2.5.3, chiusura §2.8 passi 2-3) | ✅ Fatto | `src/idp/identity_provider.py` — test in `test_idp.py`, demo in `demo_idp.py`, benchmark in `bench_idp.py` |
-| Client elettore (§2.5.2 chiavi, §2.6 cifratura + firma scheda) | ⬜ Prossimo | genera pk_voter/sk_voter, cifra `election_id ∥ head_ref ∥ vote_plain` con OAEP, firma il pacchetto |
-| Ballot Server (§2.7: token/firma/head_ref, tabella `Used`, ricevute) | ⬜ Da fare | il passo 2 è già pronto: `verify_token_as_ballot_server` |
-| Bulletin Board (§2.7: append-only, hash chain) | ⬜ Da fare | |
-| Commissione / Shamir (3,5) su Z_p (§2.4.1/§2.8.1, scrutinio §2.8.2) | ⬜ Da fare | |
+| Client elettore (§2.5.2 chiavi, §2.6 cifratura + firma scheda) | ✅ Fatto | `src/voter/client.py` — test in `test_client.py` |
+| Bulletin Board (§2.7: append-only, hash chain) | ✅ Fatto | `src/bulletin_board/bulletin_board.py` — test in `test_bulletin_board.py` |
+| Ballot Server (§2.7: token/firma/head_ref, tabella `Used`, ricevute) | ✅ Fatto | `src/ballot/ballot_server.py` — test in `test_ballot_server.py` |
+| Commissione / Shamir (3,5) su Z_p (§2.4.1/§2.8.1, scrutinio §2.8.2) | ✅ Fatto | `src/commission/shamir.py`, `commission.py` — test in `test_shamir.py`, `test_commission.py` |
+| Decifratura OAEP a (N, d) noti, senza (p, q) | ✅ Fatto | `src/common/rsa_raw.py` — test in `test_rsa_raw.py` |
+| Codifica canonica della scheda | ✅ Fatto | `src/common/ballot_encoding.py` — test in `test_ballot_encoding.py` |
+| Demo end-to-end (setup → voto → scrutinio) | ✅ Fatto | `src/demo_election.py` |
+
+## Client, Ballot Server, Bulletin Board — decisioni di scope
+
+Lavoro meccanico che ricalca pattern già visti in CA/IdP (store,
+verifica, firma), implementato insieme perché il flusso voto→BS→BB è
+un unico percorso end-to-end.
+
+- **Nessuna rete reale**: come IdP, tutto è chiamata di funzione diretta
+  (`cast_vote` produce un `Ballot`, `BallotServer.submit_ballot` lo
+  consuma). `head_ref` non viene "letto dal BB" via HTTP, è
+  `BallotServer.current_head_reference()` chiamato direttamente.
+- **`r_enc` non è mai esposta**: `encrypt_ballot` passa dritto per
+  `RSAPublicKey.encrypt` di `cryptography`, che genera la randomness
+  OAEP internamente. Conseguenza dichiarata: non è possibile
+  riprodurre nel codice lo scenario T.3 (vendita del voto via
+  ritenzione di `r_enc`) esattamente come descritto nel documento — la
+  discussione di T.3 resta valida a livello di analisi (WP3), semplicemente
+  non c'è un modo pulito di dimostrarla contro questa particolare API.
+- **`σ_token` finisce nella entry del BB**, anche se la tupla elencata
+  testualmente al passo 7 di §2.7 non lo include. Senza salvarla, il
+  controllo V.2 punto 4 di WP3 ("verificare ogni σtoken con pkIdP")
+  non sarebbe eseguibile da un osservatore esterno che non ha assistito
+  alla sottomissione. Non costa nulla in segretezza (è già nota al BS
+  al momento dell'accettazione, e non lega comunque a un'identità).
+- **Finestra di tolleranza su `head_ref`** (passo 5 di §2.7): il
+  documento la lascia parametrica ("valore dichiarato nel manifest, non
+  derivabile analiticamente"). Implementata come le ultime
+  `HEAD_REFERENCE_TOLERANCE = 5` teste accettate, non solo l'ultima —
+  altrimenti due elettori che leggono `head_ref` quasi in contemporanea
+  si bloccherebbero a vicenda per interleaving, non per un attacco.
+- **Ordine dei controlli in `submit_ballot`** rispetta rigorosamente
+  §2.7 (finestra temporale → token → unicità → integrità → coerenza
+  della testa), fermandosi al primo fallimento — l'ordine conta: una
+  scheda con `token_id` già usato viene scartata come replay (I.2)
+  anche se il suo ciphertext è stato manomesso, perché l'unicità è
+  controllata prima dell'integrità.
+
+## Commissione / Shamir (3,5) — decisioni di scope
+
+La parte a rischio più alto del piano iniziale, come previsto.
+
+- **Si condivide `d`, mai `(p, q)`**: coerente con §2.2.3. La
+  conseguenza è che la Commissione, dopo la ricostruzione, non ha un
+  `RSAPrivateKey` di `cryptography` utilizzabile (che richiederebbe i
+  fattori primi) — da qui `src/common/rsa_raw.py`, un'implementazione a
+  mano di RSADP + EME-OAEP-DECODE (RFC 8017 §7.1.2) con SHA-256, che
+  decifra dati solo `(N, d)`. Validato con un round-trip diretto contro
+  ciphertext prodotti da `cryptography` prima di collegarlo al resto.
+- **Il primo pubblico `p` non è generato con Miller-Rabin scritto a
+  mano**: un tentativo con `dh.generate_parameters` per un primo
+  "safe" anche solo di poco sopra i 2048 bit ha impiegato quasi due
+  minuti — inaccettabile anche per un solo run dei test. La soluzione:
+  si genera una chiave RSA usa-e-getta da 6144 bit (con OpenSSL via
+  `cryptography`, meno di un secondo) e si preleva uno dei due fattori
+  primi, che OpenSSL garantisce primo e che a 3072 bit è ben sopra
+  qualunque `d` di una chiave elettorale RSA-2048. La chiave RSA
+  generata per l'occasione non serve ad altro. `shamir_prime()` è
+  cache-ata (`lru_cache`): il costo si paga una sola volta per processo.
+- **Nessuna verifica della soglia di ricostruzione**: `reconstruct_secret`
+  con meno di 3 share non solleva un errore, restituisce un valore
+  sbagliato — è la proprietà stessa dello schema di Shamir (sotto
+  soglia, zero informazione), non uno schema di verifica come Feldman
+  VSS che il documento non prevede. In pratica, ricostruire con `d`
+  sbagliata fa fallire la decifratura OAEP su ogni entry del BB
+  (`TallyIntegrityError`), quindi l'errore emerge comunque, solo più a
+  valle.
+- **La chiave integra non esce mai da una funzione**: sia
+  `generate_and_share_decryption_key` sia `run_scrutiny` tengono
+  `RSAPrivateKey`/`d` in variabili locali che escono di scope a fine
+  chiamata — la rappresentazione più diretta in Python di "la chiave
+  esiste in memoria volatile solo per il tempo strettamente necessario"
+  (§2.2.4 passo 5, §2.8.1 passo 3), senza un vero dispositivo
+  air-gapped a disposizione.
+- **Le firme dei commissari sul tally bundle sono tenute separate** dal
+  `TallyBundle` stesso (`sign_tally_bundle`/`verify_tally_bundle`)
+  invece di essere incorporate nella dataclass, per poter contare
+  quante e quali firme coprono un bundle senza doverlo ricostruire.
+  `verify_tally_bundle` deduplica per chiave pubblica prima di contare:
+  trovato con `/code-review high` sui quattro componenti sopra — senza
+  dedup, la stessa coppia (chiave, firma) ripetuta nelle liste
+  d'ingresso avrebbe potuto raggiungere la soglia con meno di 3
+  commissari realmente distinti.
+- **`raw_rsa_oaep_decrypt` non è a tempo costante**, nonostante il
+  proprio docstring dichiari di voler evitare un oracolo di padding
+  (Manger's attack): lo stesso `/code-review` ha trovato che i quattro
+  controlli di validità erano combinati con `and` a corto circuito
+  (tempi diversi a seconda di quale controllo fallisce per primo) e il
+  confronto dell'hash del label usava `==` invece di
+  `hmac.compare_digest`. Corretti entrambi; resta un residuo dichiarato
+  nel commento della funzione: la scansione del separatore
+  (`rest.find`) è comunque a tempo variabile — un decode davvero
+  costante richiederebbe uno scan bit a bit, fuori scopo qui.
+- **Due segnalazioni dello stesso `/code-review` restano intenzionalmente
+  non toccate** perché fuori dal perimetro di questo WP4 (codice CA
+  preesistente, non parte dei quattro componenti nuovi): un
+  `IndexError` non gestito in `issue_certificate_from_csr` se la CSR
+  non ha un CN (`src/ca/root_ca.py`), e `CertificateStore._flush`
+  che riscrive l'intero `index.txt` a ogni emissione/revoca invece di
+  fare append incrementale (`src/ca/store.py`) — un costo O(N²)
+  accettabile per il numero di certificati di questo prototipo, non
+  per un deployment reale.
 
 ## CA — decisioni di scope
 
