@@ -67,6 +67,7 @@ resistenza alla coercizione avanzata (§2.9).
 
 | Componente | Stato | Dove |
 |---|---|---|
+| Manifest di elezione (§2.4.3) | ✅ Fatto | `src/common/manifest.py` — test in `test_manifest.py`, usato in `demo_election.py` |
 | CA (root, emissione via CSR e via chiave nuda, verifica) | ✅ Fatto | `src/ca/root_ca.py`, `csr.py`, `profiles.py` — test in `test_ca.py`, `test_csr.py`, benchmark in `bench_ca.py` |
 | CA — database `index.txt`/`serial` e revoca/CRL (§2.4.2) | ✅ Fatto | `src/ca/store.py`, `crl.py` — test in `test_crl.py` |
 | Helper condivisi (hash, firma, password salting) | ✅ Fatto | `src/common/` |
@@ -114,6 +115,51 @@ un unico percorso end-to-end.
   scheda con `token_id` già usato viene scartata come replay (I.2)
   anche se il suo ciphertext è stato manomesso, perché l'unicità è
   controllata prima dell'integrità.
+
+## Manifest di elezione — decisioni di scope
+
+Era l'ultimo scarto rimasto fra il testo di WP2 e il codice: §2.4.3
+descrive il manifest come "la radice di fiducia da cui ogni successiva
+verifica deriva", ma i parametri pubblici (pk_BS, pk_IdP, pk_BS-srv,
+head_0, (t,n), cardinalità del corpo elettorale) esistevano solo
+sparsi fra i singoli attori, mai raccolti in un oggetto firmato unico.
+
+- **Campi = elenco di §2.4.3, nello stesso ordine**: la corrispondenza
+  documento ↔ codice è verificabile voce per voce, ed è quello che
+  `test_manifest_contains_every_field_listed_in_the_document` controlla.
+- **Firma di *tutti* gli n commissari, non di t**: soglia diversa da
+  quella del tally bundle (§2.8.2) di proposito. Il manifest si firma
+  prima dell'apertura delle urne, nella cerimonia di §2.2.4 dove i 5
+  commissari sono riuniti fisicamente; accontentarsi di t qui sarebbe
+  una debolezza gratuita. Lo scrutinio è l'unico punto dove t < n è
+  giustificato, perché lì l'indisponibilità di due commissari è uno
+  scenario previsto (§3.2).
+- **La CA firma senza esporre skCA**: `UniversityCA.countersign(digest)`
+  invece di un accessore alla chiave privata, e `sign_manifest` prende
+  la funzione, non la chiave — la chiave di root non esce dalla classe
+  come non esce per certificati e CRL.
+- **Serializzazione canonica con prefissi di lunghezza**: stessa ragione
+  di `ballot_encoding`, ma qui il punto è più forte perché il payload è
+  firmato: senza delimitatori a lunghezza nota due manifest diversi
+  potrebbero produrre gli stessi byte e quindi condividere una firma
+  valida. C'è anche un tag di dominio (`APS-WP4/election-manifest/v1`)
+  perché un digest di manifest non venga scambiato per quello di una
+  ricevuta o di un tally da chi verifica con la stessa chiave.
+- **`verify_manifest` controlla anche la coerenza interna**, non solo le
+  firme: head_0 dev'essere ricalcolabile come H(election_id ∥ apertura),
+  la finestra temporale ordinata, (t,n) sensati e coerenti col numero di
+  commissari elencati. Un manifest firmato ma internamente incoerente
+  sarebbe inutilizzabile come ancora della catena del BB, e tanto vale
+  scoprirlo alla verifica che alla prima scheda.
+- **`check_turnout_consistency`**: V.2 punto 9. È la sola mitigazione
+  (parziale) che §2.3 attribuisce a F.5 — rileva token emessi oltre gli
+  aventi diritto dichiarati, non il ballot stuffing *entro* la
+  cardinalità, che resta rilevabile solo a posteriori dalla lista dei
+  partecipanti (§2.8).
+- **Nella demo il manifest è la sorgente dei parametri**, non un oggetto
+  decorativo: il Ballot Server prende da lì genesis e finestra
+  temporale, il client prende pk_BS, l'osservatore prende dai
+  certificati elencati le chiavi con cui verifica le firme del tally.
 
 ## Commissione / Shamir (3,5) — decisioni di scope
 
@@ -267,6 +313,22 @@ Implementa §2.5 e la parte IdP di §2.8.
 Uso `cryptography` per le primitive (RSA, X.509, hashing, firme); la
 logica del protocollo — ruoli, Key Usage, catena di fiducia, stato di
 `Issued`, backoff — è scritta a mano, ed è quella la parte valutata.
+
+### Correzione: doppio hashing in `common/signing.py`
+
+Ogni chiamante di `sign()`/`verify()` (IdP, Ballot Server, client,
+Commissione) passa già un digest SHA-256 pre-calcolato con
+`hashing.sha256(...)`, esattamente come il documento scrive le firme
+(es. σ_token = Sign_skIdP(H(token_id ∥ pk_voter))). `sign()`/`verify()`
+però invocavano `private_key.sign(message, padding.PKCS1v15(),
+hashes.SHA256())`: passando `hashes.SHA256()` anziché
+`utils.Prehashed(hashes.SHA256())`, `cryptography` ri-hashava il
+digest già calcolato, producendo firme su `SHA256(SHA256(...))`
+invece che su `SHA256(...)` come dichiarato. Non introduce una
+vulnerabilità nota, ma è una deviazione dal testo che non era stata
+dichiarata come le altre. Corretto usando `utils.Prehashed`; nessun
+chiamante ha dovuto cambiare, perché tutti passavano già un digest e
+non il messaggio in chiaro. Suite di test invariata: 89/89 passati.
 
 ## Convenzioni
 

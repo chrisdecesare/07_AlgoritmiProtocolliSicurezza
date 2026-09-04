@@ -41,6 +41,7 @@ from src.ca.csr import csr_proves_key_possession
 from src.ca.profiles import EntityRole, ExtensionProfile, profile_for_role, V3_CA
 from src.ca.store import CertificateStore
 from src.common.keys import generate_rsa_keypair
+from src.common.signing import sign
 
 ONE_DAY = datetime.timedelta(days=1)
 
@@ -335,6 +336,24 @@ class UniversityCA:
             now=now,
             validity=validity,
         )
+
+    # ------------------------------------------------------------------ #
+    # Controfirma del manifest di elezione (§2.4.3)
+    # ------------------------------------------------------------------ #
+
+    def countersign(self, payload: bytes) -> bytes:
+        """
+        Controfirma della CA su un digest già calcolato — serve al
+        manifest di elezione, che §2.4.3 vuole firmato "dai certificati
+        X.509 dei 5 commissari e dalla CA universitaria".
+
+        È un metodo e non un accessore alla chiave privata di proposito:
+        `_private_key` non esce mai da questa classe, come non esce nei
+        due percorsi di emissione e nella CRL. Chi deve far controfirmare
+        qualcosa passa il digest e riceve la firma, senza mai maneggiare
+        skCA — la stessa asimmetria che rende sensata l'assunzione F.1.
+        """
+        return sign(self._private_key, payload)
 
     # ------------------------------------------------------------------ #
     # Verifica

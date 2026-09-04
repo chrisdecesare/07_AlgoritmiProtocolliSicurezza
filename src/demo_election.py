@@ -20,6 +20,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 from src.ballot.ballot_server import (
+    HEAD_REFERENCE_TOLERANCE,
     BallotServer,
     DuplicateBallotError,
     InvalidBallotSignatureError,
@@ -34,10 +35,16 @@ from src.commission.commission import (
     sign_tally_bundle,
     verify_tally_bundle,
 )
-from src.commission.shamir import SHAMIR_THRESHOLD
+from src.commission.shamir import SHAMIR_THRESHOLD, SHAMIR_TOTAL_SHARES
 from src.common.ballot_encoding import VOTE_NO, VOTE_YES
 from src.common.hashing import sha256
-from src.common.keys import generate_rsa_keypair
+from src.common.keys import RSA_KEY_SIZE_BITS, generate_rsa_keypair
+from src.common.manifest import (
+    ElectionManifest,
+    check_turnout_consistency,
+    sign_manifest,
+    verify_manifest,
+)
 from src.common.password_hash import hash_password
 from src.idp.identity_provider import IdentityProvider
 from src.voter.client import cast_vote, generate_voter_keypair
@@ -74,17 +81,63 @@ def main() -> None:
     print("  sk_BS integra non è mai uscita da quella funzione: da qui in poi esistono solo le share.")
 
     bs_signing_key = generate_rsa_keypair()
-    genesis = genesis_head(ELECTION_ID, "2026-05-01T08:00:00Z")
     now = datetime.now(timezone.utc)
-    ballot_server = BallotServer(
+    opens_at = now - timedelta(minutes=1)
+    closes_at = now + timedelta(hours=1)
+
+    # I 5 commissari della cerimonia di §2.2.4: certificati dalla CA, sono
+    # loro (tutti, non solo t) a firmare il manifest insieme alla CA.
+    commissioner_keys = [generate_rsa_keypair() for _ in range(SHAMIR_TOTAL_SHARES)]
+    commissioner_certificates = tuple(
+        ca.issue_certificate(f"commissario-{i}", EntityRole.COMMISSIONER, public_key=key.public_key()).certificate
+        for i, key in enumerate(commissioner_keys, 1)
+    )
+
+    # Manifest di elezione (§2.4.3): fissa il contesto crittografico
+    # PRIMA dell'apertura delle urne. Da qui in poi client e osservatori
+    # leggono i parametri da qui, non "sulla parola" da IdP o BS.
+    manifest = ElectionManifest(
         election_id=ELECTION_ID,
-        genesis_head=genesis,
+        question="Sei favorevole alla modifica dello statuto di Ateneo?",
+        options=(VOTE_YES, VOTE_NO),
+        voting_opens_at=opens_at,
+        voting_closes_at=closes_at,
+        encryption_public_key=decryption_key.public_key,
+        pke_scheme="RSA-OAEP",
+        pke_modulus_bits=RSA_KEY_SIZE_BITS,
+        pke_hash="SHA-256",
+        shamir_prime=decryption_key.prime,
+        shamir_threshold=SHAMIR_THRESHOLD,
+        shamir_total_shares=SHAMIR_TOTAL_SHARES,
+        bs_signing_public_key=bs_signing_key.public_key(),
+        idp_signing_public_key=idp_signing_key.public_key(),
+        commissioner_certificates=commissioner_certificates,
+        electorate_size=6,
+        idp_endpoint="https://idp.unisa.it/vote",
+        ballot_server_endpoint="https://bs.unisa.it/ballots",
+        bulletin_board_endpoint="https://bb.unisa.it/",
+        idp_tls_certificate=ca.issue_certificate("idp.unisa.it", EntityRole.IDP_TLS).certificate,
+        bs_tls_certificate=ca.issue_certificate("bs.unisa.it", EntityRole.BS_TLS).certificate,
+        genesis_head=genesis_head(ELECTION_ID, opens_at.isoformat()),
+        head_reference_tolerance=HEAD_REFERENCE_TOLERANCE,
+        voting_client_hash=sha256(b"client-di-voto-ufficiale-v1"),
+    )
+    signed_manifest = sign_manifest(manifest, commissioner_keys, ca.countersign)
+    print(f"\n[Commissione] Manifest di elezione pubblicato e firmato da {len(commissioner_keys)} commissari + CA (§2.4.3).")
+
+    # Il primo atto di chiunque — client o osservatore — è verificare il
+    # manifest: è la radice di fiducia, tutto il resto deriva da qui.
+    print(f"[Client/Osservatore] Verifica del manifest prima di ogni interazione: {verify_manifest(signed_manifest, ca.certificate)}")
+
+    ballot_server = BallotServer(
+        election_id=manifest.election_id,
+        genesis_head=manifest.genesis_head,
         signing_key=bs_signing_key,
-        signing_public_key=bs_signing_key.public_key(),
+        signing_public_key=manifest.bs_signing_public_key,
         idp_certificate=idp_certificate,
         ca_certificate=ca.certificate,
-        voting_opens_at=now - timedelta(minutes=1),
-        voting_closes_at=now + timedelta(hours=1),
+        voting_opens_at=manifest.voting_opens_at,
+        voting_closes_at=manifest.voting_closes_at,
     )
 
     # 1. Registro elettorale (F.6, fuori dal protocollo).
@@ -121,7 +174,7 @@ def main() -> None:
 
         head_ref = ballot_server.current_head_reference()
         ballot = cast_vote(
-            token, voter_key, decryption_key.public_key, ELECTION_ID, head_ref, prefer_yes=prefer_yes
+            token, voter_key, manifest.encryption_public_key, ELECTION_ID, head_ref, prefer_yes=prefer_yes
         )
         receipt = ballot_server.submit_ballot(ballot)
         receipts[matricola] = (ballot, receipt)
@@ -150,7 +203,7 @@ def main() -> None:
     interceptable_voter_key = generate_voter_keypair()
     interceptable_token = idp.issue_token("0522500006", interceptable_voter_key.public_key())
     interceptable_ballot = cast_vote(
-        interceptable_token, interceptable_voter_key, decryption_key.public_key,
+        interceptable_token, interceptable_voter_key, manifest.encryption_public_key,
         ELECTION_ID, ballot_server.current_head_reference(), prefer_yes=True,
     )
     tampered = replace(interceptable_ballot, ciphertext=b"\x00" * len(interceptable_ballot.ciphertext))
@@ -189,10 +242,26 @@ def main() -> None:
     no_count = bundle.tally.get(VOTE_NO, 0)
     print(f"[Commissione] Schede decifrate: {bundle.total_decrypted}  Tally: {{SI: {yes_count}, NO: {no_count}}}")
 
-    commissioners = [generate_rsa_keypair() for _ in range(SHAMIR_THRESHOLD)]
-    signatures = sign_tally_bundle(bundle, commissioners)
-    verified = verify_tally_bundle(bundle, [c.public_key() for c in commissioners], signatures, threshold=SHAMIR_THRESHOLD)
-    print(f"[Osservatore] Tally bundle verificato con le {SHAMIR_THRESHOLD} firme dei commissari: {verified}")
+    # Firmano i 3 commissari che hanno davvero partecipato (C1, C3, C5);
+    # l'osservatore preleva le loro chiavi pubbliche dai certificati
+    # elencati nel manifest, non da chi gli passa le firme — è la catena
+    # manifest -> certificati -> firma del tally che rende eseguibile
+    # V.2 punto 8 per chi non ha assistito allo scrutinio.
+    scrutiny_indexes = (0, 2, 4)
+    scrutiny_keys = [commissioner_keys[i] for i in scrutiny_indexes]
+    signatures = sign_tally_bundle(bundle, scrutiny_keys)
+    observer_public_keys = [manifest.commissioner_certificates[i].public_key() for i in scrutiny_indexes]
+    verified = verify_tally_bundle(bundle, observer_public_keys, signatures, threshold=SHAMIR_THRESHOLD)
+    print(f"[Osservatore] Tally bundle verificato con le {SHAMIR_THRESHOLD} firme dei commissari del manifest: {verified}")
+
+    # V.2 punto 9: token emessi vs schede registrate vs cardinalità
+    # dichiarata nel manifest prima dell'apertura delle urne (F.5).
+    tokens_issued = len(participant_list.matricole)
+    print(
+        f"[Osservatore] Token emessi={tokens_issued}, schede registrate={len(bb.entries)}, "
+        f"aventi diritto dichiarati nel manifest={manifest.electorate_size} -> "
+        f"coerenza: {check_turnout_consistency(manifest, tokens_issued, len(bb.entries))}"
+    )
 
     print(
         "\n[Osservatore] Nota: la lista mescolata dei voti decifrati non porta alcun "

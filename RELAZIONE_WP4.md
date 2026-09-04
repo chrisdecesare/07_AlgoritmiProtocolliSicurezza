@@ -178,10 +178,58 @@ alcun riferimento a `IDseq` o `pk_voter`, per non compromettere C.2/C.3
 — e produce un tally firmato congiuntamente dai commissari partecipanti,
 verificabile da chiunque con le sole chiavi pubbliche pubblicate.
 
-## 4.9 Verifica sperimentale e test
+## 4.9 Manifest di elezione
+
+Realizza §2.4.3, il documento firmato che fissa prima dell'apertura
+delle urne l'intero contesto crittografico dell'elezione e che il testo
+descrive come «la radice di fiducia da cui ogni successiva verifica
+deriva». I campi implementati sono esattamente le voci elencate in
+§2.4.3, nello stesso ordine: identificativo e quesito con le opzioni
+canoniche, finestra temporale, `pk_BS` con schema PKE e primo pubblico
+`p`, `pk_BS-srv`, `pk_IdP`, elenco dei commissari con i rispettivi
+certificati X.509 e parametri `(t, n)`, cardinalità del corpo
+elettorale, indirizzi pubblici e certificati di trasporto, `head_0` e
+hash del client ufficiale.
+
+La firma segue la prescrizione del documento — tutti i commissari più
+la CA di Ateneo — e adotta quindi una soglia deliberatamente più
+stringente di quella del tally bundle (§2.8.2, dove bastano i `t`
+partecipanti): il manifest si firma durante la cerimonia di §2.2.4, con
+i cinque commissari riuniti fisicamente, dove non c'è ragione di
+accontentarsi di una maggioranza qualificata. La CA controfirma senza
+mai esporre la propria chiave privata, coerentemente con il modo in cui
+firma certificati e CRL.
+
+La verifica non si limita alle firme: controlla anche la coerenza
+interna del manifest, in particolare che `head_0` sia ricalcolabile
+come `H(election_id ∥ timestamp_apertura)` dai campi dichiarati. Un
+manifest firmato ma internamente incoerente sarebbe inutilizzabile come
+ancora della catena di hash del Bulletin Board, e il momento giusto per
+accorgersene è la verifica della radice di fiducia, non l'arrivo della
+prima scheda.
+
+È inoltre implementato il controllo di coerenza dell'affluenza (V.2
+punto 9): il confronto fra token emessi, schede registrate e cardinalità
+dichiarata nel manifest. È la sola mitigazione, dichiaratamente
+parziale, che §2.3 attribuisce all'assunzione F.5 sulla correttezza del
+registro elettorale — rende rilevabile un'emissione di token oltre il
+numero di aventi diritto fissato prima dell'apertura delle urne, non un
+ballot stuffing che resti entro quella cardinalità, il quale rimane
+rilevabile soltanto a posteriori attraverso la lista firmata dei
+partecipanti (§2.8).
+
+Nella demo end-to-end il manifest non è un artefatto decorativo ma la
+sorgente effettiva dei parametri: il Ballot Server ne ricava `head_0` e
+la finestra temporale, il client di voto la chiave di cifratura, e
+l'osservatore preleva dai certificati elencati le chiavi pubbliche con
+cui verifica le firme del tally — la catena manifest → certificati →
+firme è ciò che rende eseguibile la verifica universale da parte di chi
+non ha assistito né alla cerimonia né allo scrutinio.
+
+## 4.10 Verifica sperimentale e test
 
 L'implementazione è accompagnata da una batteria di test automatici
-(circa 90 casi), organizzata per proprietà di sicurezza piuttosto che
+(105 casi), organizzata per proprietà di sicurezza piuttosto che
 per solo percorso felice: per ciascun componente sono presenti casi
 dedicati a I.1/I.2/I.3 (autenticità, unicità, integrità), C.2
 (non-correlabilità), V.1/V.2 (verificabilità individuale e universale),
@@ -199,7 +247,7 @@ Server. Lo scrutinio finale è eseguito con solo 3 commissari su 5,
 dimostrando che la soglia (3,5) di §2.2.3 non richiede la
 partecipazione di tutti i membri della Commissione.
 
-## 4.10 Deviazioni dichiarate rispetto al testo di WP2
+## 4.11 Deviazioni dichiarate rispetto al testo di WP2
 
 Coerentemente con la convenzione adottata in tutto il progetto — ogni
 scelta implementativa che si discosta dal testo letterale del documento
@@ -223,7 +271,7 @@ va dichiarata e motivata — si segnalano due deviazioni minori:
   indipendentemente da questa scelta implementativa, che riguarda la
   dimostrabilità sperimentale del rischio, non la sua esistenza.
 
-## 4.11 Limiti noti confermati dall'implementazione
+## 4.12 Limiti noti confermati dall'implementazione
 
 L'implementazione non introduce mitigazioni ulteriori rispetto a quanto
 dichiarato in WP3 per i rischi non mitigati (T.2, T.3, T.4): un client

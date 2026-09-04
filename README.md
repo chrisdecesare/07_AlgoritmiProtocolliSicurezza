@@ -22,6 +22,7 @@ funzionano integrati fra loro (vedi `src/demo_election.py`).
 │   │   ├── signing.py         # sign/verify RSA hash-and-sign (PKCS1v15 + SHA-256)
 │   │   ├── password_hash.py   # Salted password hashing (§2.2.5)
 │   │   ├── ballot_encoding.py # Codifica canonica election_id ∥ head_ref ∥ voto (§2.2.1, §2.6)
+│   │   ├── manifest.py        # Manifest di elezione firmato — radice di fiducia (§2.4.3)
 │   │   └── rsa_raw.py         # RSA-OAEP decrypt manuale da soli (N, d) — RFC 8017 (§2.8.2)
 │   ├── ca/                    # Certification Authority di Ateneo (§2.3, §2.4.2)
 │   ├── idp/                   # Identity Provider — autenticazione + token (§2.5), chiusura (§2.8)
@@ -81,12 +82,15 @@ poi la revoca della chiave elettorale dell'IdP a urne chiuse (§2.4.2).
 ```bash
 PYTHONPATH=. python3 -m src.demo_election
 ```
-Setup (CA + cerimonia Shamir della Commissione) → autenticazione e
-token per 6 elettori → 4 votano, 1 si astiene → un replay dello stesso
-token viene respinto (I.2) → un tentativo di manomissione in transito
-viene respinto (I.3) → verifica indipendente della catena di hash del
-Bulletin Board → chiusura urne → scrutinio con solo 3 commissari su 5
-(§2.8.1) → tally verificato con le firme della Commissione.
+Setup (CA + cerimonia Shamir della Commissione + manifest firmato da 5
+commissari e dalla CA, verificato dal client prima di ogni interazione)
+→ autenticazione e token per 6 elettori → 4 votano, 1 si astiene → un
+replay dello stesso token viene respinto (I.2) → un tentativo di
+manomissione in transito viene respinto (I.3) → verifica indipendente
+della catena di hash del Bulletin Board → chiusura urne → scrutinio con
+solo 3 commissari su 5 (§2.8.1) → tally verificato con le chiavi
+pubbliche prese dai certificati del manifest → confronto token
+emessi/schede/cardinalità dichiarata (V.2 punto 9).
 
 **5. Eseguire i test:**
 ```bash
@@ -103,6 +107,7 @@ PYTHONPATH=. python3 benchmarks/bench_idp.py --iterations 200
 
 | Componente | Stato |
 |---|---|
+| Manifest di elezione (§2.4.3, firmato da 5 commissari + CA) | ✅ Fatto, testato |
 | CA (root + emissione via CSR/proof-of-possession + revoca/CRL) | ✅ Fatto, testato, con benchmark |
 | IdP (autenticazione challenge-response §2.5 + token + chiusura §2.8) | ✅ Fatto, testato, con benchmark |
 | Client elettore (chiavi §2.5.2, cifratura + firma voto §2.6) | ✅ Fatto, testato |
