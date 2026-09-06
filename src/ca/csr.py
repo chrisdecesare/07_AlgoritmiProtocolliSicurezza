@@ -1,5 +1,5 @@
 """
-CSR (PKCS#10) — passi 1-2 di "PKI – Certification" (slide 06): il
+CSR - Certificate Signing Request (PKCS#10) — passi 1-2 di "PKI – Certification" : il
 soggetto genera la coppia in locale e chiede alla CA di certificare
 (subject_ID, public_key).
 
@@ -25,7 +25,7 @@ def create_csr(
     country_name: str = "IT",
 ) -> x509.CertificateSigningRequest:
     """
-    Costruisce e autofirma la CSR (passi 1-2 di "PKI – Certification").
+    Costruisce e autofirma la CSR (passi 1-2 auth e validazione di "PKI – Certification").
 
     Il chiamante genera la coppia altrove (tipicamente con
     `generate_rsa_keypair`) e passa qui solo `private_key`; la chiave

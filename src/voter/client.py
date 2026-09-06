@@ -2,10 +2,8 @@
 Client dell'elettore — §2.5.2 (generazione locale della coppia di
 chiavi) e §2.6 (espressione del voto).
 
-Il client è honest-by-assumption (§2.3, F.6): quello che c'è qui è il
-percorso corretto, non una difesa contro un client compromesso (T.2),
-che il documento dichiara esplicitamente fuori portata per un client
-che esegue codice sul cui ambiente non ha più controllo (§3.7).
+Il client è honest-by-assumption (§2.3, F.6), purtroppo non possiamo gestire la situazione
+in cui l'utente vende il proprio voto quidni compromesso (§3.7).
 
 Non fa nulla di rete: le funzioni prendono in input ciò che
 normalmente arriverebbe da IdP/BS (head_ref, token) e restituiscono un

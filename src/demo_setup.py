@@ -10,6 +10,17 @@ Uso: PYTHONPATH=. python3 -m src.demo_setup
 """
 from __future__ import annotations
 
+import sys
+
+# Forza stdout/stderr a UTF-8: su Windows la console (cp1252) non sa
+# codificare i simboli usati nella notazione del protocollo (σ, ∥, ...)
+# che possono comparire nei messaggi di errore.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8")
+    except (AttributeError, ValueError):
+        pass
+
 import pathlib
 
 from cryptography.hazmat.primitives import serialization
@@ -105,10 +116,15 @@ def main() -> None:
     print("\n" + "-" * 78)
     print(" Controprova di sicurezza:")
     print("-" * 78)
+    print(
+        "\n[ATTACCANTE - CA IMPERSONATION] Un Ateneo Impostore crea una propria CA "
+        "e si emette un certificato per lo stesso nome 'idp.unisa.it', nel tentativo "
+        "di farsi passare per il vero IdP. Proprieta' attaccata: autenticita' della PKI..."
+    )
     impostor_ca = UniversityCA(organization_name="Ateneo Impostore")
     forged = impostor_ca.issue_certificate("idp.unisa.it", EntityRole.IDP_TLS)
     rejected = not ca.verify_certificate(forged.certificate)
-    print(f"  Certificato falso (altra CA) rifiutato dalla nostra CA: {rejected}")
+    print(f"  Rifiutato correttamente - autenticita' preservata: certificato falso rispedito al mittente ({rejected})")
 
     print(f"\n  Totale certificati salvati in '{CERTS_DIR}/': {len(issued_all) + 1}")
     print("  (apri i .cert.pem con:  openssl x509 -in <file> -text -noout )\n")

@@ -12,11 +12,8 @@ dal solo IdP"). A urne chiuse pubblica la lista firmata di chi ha
 ricevuto un token (mitiga il ballot stuffing, T.6) e poi distrugge
 Issued con una dichiarazione firmata.
 
-Nota su hpwd: resta plaintext-equivalent per costruzione (§2.2.5) — non
-è un bug, è il costo che il documento accetta per quello schema, e non
-l'ho "corretto" di nascosto con qualcos'altro.
 
-Due cose che questo modulo NON fa, apposta: non genera pk_voter/sk_voter
+Due cose che questo modulo NON fa se il prof dovesse chiederle,: non genera pk_voter/sk_voter
 (tocca al client dell'elettore, l'IdP non deve mai vederle prima del
 dovuto — §2.5.2); e non impedisce a un IdP disonesto di emettere token
 per astenuti (ballot stuffing, T.6) — il documento lo dichiara rilevabile
@@ -123,8 +120,8 @@ class IdentityProvider:
     """
     IdP onesto: implementa §2.5 e la parte IdP di §2.8.
 
-    `clock` è iniettabile così nei test posso simulare il passare del
-    tempo per il backoff senza dover davvero aspettare secondi veri.
+    `clock` è iniettabile così nei test possiamo simulare il passare del
+    tempo per il backoff senza dover aspettare il tempo vero
     """
 
     def __init__(
@@ -156,7 +153,7 @@ class IdentityProvider:
         return self._signing_public_key
 
     # ------------------------------------------------------------------ #
-    # Registro elettorale (assunzione F.6, §2.3): fuori scope del
+    # Registro elettorale (mi pare fosse una delle ultimi assunzioni (ho controllato è la F.6), §2.3): fuori scope del
     # protocollo, qui simulato come semplice enrollment.
     # ------------------------------------------------------------------ #
 
@@ -176,20 +173,42 @@ class IdentityProvider:
     def start_authentication(self, matricola: str) -> tuple[bytes, bytes]:
         """Passi 1-3 di §2.5.1: l'elettore manda la matricola, l'IdP
         recupera (saltM, hpwd) e genera n1, restituendo (saltM, n1)."""
+
+        # Verifica che la matricola non sia temporaneamente bloccata
+        # a causa di precedenti tentativi di autenticazione falliti magari
         self._raise_if_blocked(matricola)
+
+        # Cerca nel registro dell'IdP i dati associati alla matricola.
+        # Il record contiene, tra le altre informazioni, il salt dell'elettore.
         record = self._students.get(matricola)
+
+        # Se la matricola non è presente nel registro, interrompe
+        # il processo di autenticazione.
         if record is None:
             raise AuthenticationError(f"matricola '{matricola}' non presente nel registro elettorale")
 
+
+
+        # SOLUZIONE REPLAY ATTACK
+        #genera la nounce e imprevedibile n1 e la uso per fare la challenge in questa
+        # sessione di autenticazione e impedisco di usarla per precedenti risposte
         nonce = os.urandom(NONCE_LENGTH_BYTES)
+
+        # Salva la challenge associata alla matricola.
+        # L'IdP potrà verificare, nel passo successivo,
+        # che la risposta ricevuta si riferisca proprio a questo nonce.
         self._pending_challenges[matricola] = _PendingChallenge(nonce=nonce)
+
+        # Restituisce al client il salt associato all'elettore e il nonce
+        # appena generato. Il client userà questi valori nei passi successivi
+        # del protocollo di autenticazione.
         return record.salt, nonce
 
     def verify_authentication(self, matricola: str, response: bytes) -> bool:
         """
         Passi 4-6 di §2.5.1: confronto response con H(n1 ∥ hpwd), a tempo
         costante (`hmac.compare_digest`) per evitare il classico timing
-        attack da confronto byte-a-byte (il caso Xbox 360 delle slide).
+        attack da confronto byte-a-byte (ti ricordi l'esempio dell'XBOX? PS>XBOX comunque).
 
         La sessione viene consumata al primo tentativo, riuscito o no: n1
         è usa e getta, quindi anche un tentativo fallito non lascia una
@@ -203,7 +222,30 @@ class IdentityProvider:
                 f"(scaduta, mai iniziata, o già consumata)"
             )
 
+
+        #prendo dal registro degli studenti il record associato alla loro matricola
+        """
+            matricola
+               │
+               ▼
+            self._students[matricola]
+               │
+               ▼
+            record
+               │
+               └── password_hash
+                      │
+                      ▼
+            sha256(nonce, password_hash)
+                      │
+                      ▼
+                 expected response
+        """
         record = self._students[matricola]
+
+        # prendo la nonce di challenge e poi faccio hash della password memorizzata
+        #nell'IDP quindi valuto se la risposta dell'utente è quella che mi aspetto altrimenti
+        # mi segno che c'è stato un fallimento
         expected = sha256(challenge.nonce, record.password_hash)
         if not compare_digest(expected, response):
             self._register_failed_attempt(matricola)
@@ -213,6 +255,9 @@ class IdentityProvider:
         self._authenticated.add(matricola)
         return True
 
+
+    #questo è il metodo che mi serve sopra perchè voglio controllare se
+    #le richieste di quella matricola sono bloccati o meno
     def _raise_if_blocked(self, matricola: str) -> None:
         blocked_until = self._blocked_until.get(matricola)
         if blocked_until is not None and self._clock() < blocked_until:
@@ -222,12 +267,21 @@ class IdentityProvider:
             )
 
     def _register_failed_attempt(self, matricola: str) -> None:
+        # Recupera il numero di tentativi falliti già registrati per questa
+        # matricola. Se non ce ne sono, parte da 0. Poi incrementa il contatore
+        # di uno per registrare il nuovo tentativo fallito.
         attempts = self._failed_attempts.get(matricola, 0) + 1
+
+        #salvo nel dizionario il num. nuovov di tentativi falliti associati alla matricola
         self._failed_attempts[matricola] = attempts
+
+        #ho impostato MAX_FAILED_ATTEMPS a 3 come costante ma poi dimmi se ti va bene salvatò
         if attempts >= MAX_FAILED_ATTEMPTS:
             exponent = attempts - MAX_FAILED_ATTEMPTS
             delay = timedelta(seconds=BACKOFF_BASE_SECONDS * (2**exponent))
             self._blocked_until[matricola] = self._clock() + delay
+
+
 
     # ------------------------------------------------------------------ #
     # §2.5.3 — Emissione del token di voto
@@ -237,6 +291,8 @@ class IdentityProvider:
         """I 6 passi di §2.5.3. Richiede un'autenticazione appena riuscita
         per la stessa matricola (I.1); l'autorizzazione è usa e getta,
         questa chiamata la consuma."""
+
+        #valuto già il caso in cui l'elezione sia terminata e non ci deve stare la tabella ISSUEd
         if self._issued_destroyed:
             raise ElectionClosedError("Issued è già stata distrutta: le urne sono chiuse")
 
@@ -272,6 +328,9 @@ class IdentityProvider:
         """Verifica σ_token con pkIdP — comoda per i test perché usa la
         pkIdP di questa istanza; il BS reale userebbe la sua, presa dal
         manifest (§2.7, passo 2)."""
+
+        # public_key_der(token.voter_public_key)
+        # serve a trasformare la chiave pubblica del votante in una rappresentazione binaria standard.
         digest = sha256(token.token_id, public_key_der(token.voter_public_key))
         return verify(self._signing_public_key, digest, token.signature)
 
@@ -282,12 +341,16 @@ class IdentityProvider:
     def close_and_publish_participants(self) -> SignedParticipantList:
         """Passo 2 di §2.8: pubblica firmata la lista di chi ha ricevuto
         un token — mitiga il ballot stuffing (T.6), perché anche un
-        astenuto può controllare di non comparirci."""
+        astenuto può controllare di non comparirci. Che è un caso che ci stavamo perdendo """
         matricole = tuple(sorted(self._issued.keys()))
         payload = sha256(self._election_id.encode(), b"|", b",".join(m.encode() for m in matricole))
         signature = sign(self._signing_key, payload)
         return SignedParticipantList(election_id=self._election_id, matricole=matricole, signature=signature)
 
+
+
+
+    #questa è la funzione più importante per quanto riguarda la tabella ISssued
     def destroy_issued_table(self) -> SignedDestructionStatement:
         """Passo 3 di §2.8: svuota Issued (serve per C.2) ed emette una
         dichiarazione firmata. È responsabilità non ripudiabile, non una
@@ -307,6 +370,9 @@ class IdentityProvider:
         return SignedDestructionStatement(timestamp=timestamp, signature=signature)
 
 
+
+
+# In questa sezione mettiamo verifiche extra che peò anche altri possono fare
 # Verifiche indipendenti: chiunque le può fare con la sola pkIdP dal
 # manifest, senza uno stato dell'IdP — per questo sono funzioni di modulo
 # e non metodi.

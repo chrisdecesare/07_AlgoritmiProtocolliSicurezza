@@ -16,6 +16,18 @@ Uso: PYTHONPATH=. python3 -m src.demo_election
 """
 from __future__ import annotations
 
+import sys
+
+# Forza stdout/stderr a UTF-8: su Windows la console (cp1252) non sa
+# codificare i simboli usati nella notazione del protocollo (σ, ∥, ...)
+# che compaiono nei messaggi di errore, causando un UnicodeEncodeError
+# a runtime nel bel mezzo della demo.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8")
+    except (AttributeError, ValueError):
+        pass
+
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
@@ -142,12 +154,12 @@ def main() -> None:
 
     # 1. Registro elettorale (F.6, fuori dal protocollo).
     students = {
-        "0522500001": "Tr0ub4dor&3",
-        "0522500002": "correct horse battery staple",
-        "0522500003": "hunter2-ma-meglio",
+        "0522500001": "Tr4v5&gh8",
+        "0522500002": "spirit cavallo selvaggio",
+        "0522500003": "anguissa99",
         "0522500004": "una password decente",
         "0522500005": "altra password decente",
-        "0522500006": "yet-another-decent-password",
+        "0522500006": "tortellini56$",
     }
     for matricola, password in students.items():
         idp.enroll_student(matricola, password)
@@ -185,19 +197,28 @@ def main() -> None:
     print(f"  [{'0522500005'}] astenuto: non richiede mai un token.")
 
     # 4. Un elettore tenta di rivotare con lo stesso token (I.2).
-    print("\n[Attaccante] Riinvio dello stesso pacchetto di voto di 0522500001 (replay)...")
+    print(
+        "\n[ATTACCANTE - REPLAY ATTACK] Cattura e re-invio del pacchetto di voto "
+        "gia' accettato (stesso token_id) di 0522500001, nel tentativo di far "
+        "contare due volte lo stesso voto. Proprieta' attaccata: unicita' (I.2)..."
+    )
     first_ballot, _ = receipts["0522500001"]
     try:
         ballot_server.submit_ballot(first_ballot)
         print("  ERRORE: il secondo invio non doveva essere accettato!")
     except DuplicateBallotError as exc:
-        print(f"  Rifiutato correttamente (I.2): {exc}")
+        print(f"  Rifiutato correttamente - unicita' preservata (I.2): {exc}")
 
     # 5. Un intercettatore altera in transito il ciphertext di una scheda
     #    firmata ma non ancora sottomessa (I.3). Serve una scheda fresca:
     #    riusarne una già accettata cadrebbe prima sul controllo di
     #    unicità del passo 3 (token_id già in Used), non su questo.
-    print("\n[Intercettatore] Sostituzione di C in una scheda firmata ma non ancora inviata...")
+    print(
+        "\n[ATTACCANTE - TAMPERING ATTACK / MITM] Un intercettatore modifica in "
+        "transito il ciphertext C di una scheda gia' firmata dall'elettore "
+        "0522500006 ma non ancora inviata, per alterare il voto senza essere "
+        "l'elettore legittimo. Proprieta' attaccata: integrita' (I.3)..."
+    )
     salt, nonce = idp.start_authentication("0522500006")
     idp.verify_authentication("0522500006", client_response(salt, nonce, students["0522500006"]))
     interceptable_voter_key = generate_voter_keypair()
@@ -211,7 +232,7 @@ def main() -> None:
         ballot_server.submit_ballot(tampered)
         print("  ERRORE: la scheda manomessa non doveva essere accettata!")
     except InvalidBallotSignatureError as exc:
-        print(f"  Rifiutato correttamente (I.3): {exc}")
+        print(f"  Rifiutato correttamente - integrita' preservata (I.3): {exc}")
 
     # 6. Verifica universale della catena di hash (V.2, punto 3).
     bb = ballot_server.bulletin_board

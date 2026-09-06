@@ -1,6 +1,6 @@
 """
 CA universitaria — simula la PKI di Ateneo che il documento dà per
-scontata (§2.3).
+trusted (§2.3).
 
 Segue i 6 passi di "PKI – Certification" (slide 06): 1-2 stanno in
 `csr.py` (il soggetto genera la coppia e manda la CSR), 3 è
@@ -9,12 +9,10 @@ condivisi dai due percorsi di emissione. Le estensioni vengono dai
 profili di `profiles.py`, i certificati sono tracciati in `store.py`
 (index.txt + serial), la revoca e la CRL sono in `crl.py`.
 
-Fuori scope, di proposito: gerarchia root/intermedia (il documento
-assume una sola CA — `pathlen:0` sulla root lo rende un vincolo
-verificabile, non solo una dichiarazione) e OCSP (discusso in crl.py).
 
-Questo modulo non è una scelta di design del protocollo: implementa
-un'assunzione di fiducia che il documento dà per acquisita (F.1).
+assumo una sola CA ed OCSP (discusso in crl.py).
+
+
 """
 from __future__ import annotations
 
@@ -45,8 +43,7 @@ from src.common.signing import sign
 
 ONE_DAY = datetime.timedelta(days=1)
 
-# EntityRole viveva qui prima di finire in profiles.py insieme ai
-# profili; lo riesporto per non rompere chi lo importa da qui.
+# EntityRole viveva qui prima di finire in profiles.py insieme ai profili.
 __all__ = ["EntityRole", "IssuedCertificate", "UniversityCA", "verify_certificate_with_crl"]
 
 
@@ -58,8 +55,10 @@ class IssuedCertificate:
     private_key: RSAPrivateKey | None
 
     def certificate_pem(self) -> bytes:
+        """
+        Devo trasformare il certificato creato con cryptography in formato PEM
+        """
         from cryptography.hazmat.primitives import serialization
-
         return self.certificate.public_bytes(serialization.Encoding.PEM)
 
 
@@ -69,9 +68,8 @@ class UniversityCA:
     del sistema di voto e gestisce la revoca.
 
     Nella realtà la chiave privata della root andrebbe generata offline e
-    tenuta al sicuro (come consiglia il Lab 4). Qui resta in memoria per
-    semplicità — è una scorciatoia del prototipo, non qualcosa che il
-    protocollo richiede.
+    tenuta al sicuro (come consigliava il prof Mazzocca nel Lab 4, però non so come rappresentare questa cosa, ok Salvatare?).
+    Qui resta in memoria per semplicità
     """
 
     ROOT_VALIDITY = 365 * ONE_DAY          # vita della root, non della singola elezione
@@ -86,7 +84,7 @@ class UniversityCA:
         """
         `crl_url`, se dato, finisce scritto in ogni certificato emesso
         (estensione `crlDistributionPoints`) così chi verifica sa dove
-        cercare la CRL. `store_directory`, se data, scrive index.txt /
+        cercare la CRL, Certification Revocation List. `store_directory`, se data, scrive index.txt /
         serial / crlnumber su disco; altrimenti restano in memoria.
         """
         self._organization_name = organization_name
@@ -95,9 +93,12 @@ class UniversityCA:
         self._private_key: RSAPrivateKey = generate_rsa_keypair()
         self._certificate: x509.Certificate = self._self_sign_root()
 
-    # ------------------------------------------------------------------ #
+
+
+
+    # ------------------------------------------------------------------
     # Root
-    # ------------------------------------------------------------------ #
+    # ------------------------------------------------------------------
 
     def _self_sign_root(self) -> x509.Certificate:
         """Certificato di root, self-signed, profilo v3_ca. Il serial è
@@ -147,9 +148,9 @@ class UniversityCA:
         """Database dei certificati emessi (`index.txt` + `serial`)."""
         return self._store
 
-    # ------------------------------------------------------------------ #
+    # ------------------------------------------------------------------
     # Emissione certificati finali — logica condivisa
-    # ------------------------------------------------------------------ #
+    # ------------------------------------------------------------------
 
     def _build_leaf_certificate(
         self,
@@ -159,9 +160,9 @@ class UniversityCA:
         validity: datetime.timedelta,
     ) -> x509.Certificate:
         """Passi 4-6 di "PKI – Certification": firma, allega, restituisce.
-        Le estensioni arrivano tutte dal `profile`, non sono decise qui.
-        Il certificato viene anche registrato in index.txt — è questo che
-        lo rende revocabile in seguito."""
+        Le estensioni arrivano tutte dal `profile`, non sono decise qui. O meglio prima si poi ho deciso di cambiarlo
+        Il certificato viene anche registrato in index.txt — è questo lo dovrebbe rendere revocabile in futuro
+        """
         now = datetime.datetime.now(datetime.timezone.utc)
 
         builder = (
@@ -207,10 +208,22 @@ class UniversityCA:
                 f"certificati per identità non verificate (PKI-Certification, passo 3)."
             )
 
-    # ------------------------------------------------------------------ #
-    # Emissione — percorso raccomandato (CSR)
-    # ------------------------------------------------------------------ #
+    # ------------------------------------------------------------------
+    # Emissione del certificato— CSR Certificate Signing Request, richiesta di firma di un certificato
+    # ------------------------------------------------------------------
 
+    """
+    La CSR contiene la chiave pubblica del soggetto e una firma fatta con la sua chiave privata. 
+    La chiave privata non viene inviata alla CA.
+    
+    
+    
+    
+    
+    csr indica che dentro al certificato già dovrebbe esserci la csr ricevuto
+    role indica il ruolo che potrebbe essere COMMISSIONER, VOTER ecc
+    la validità può essere la data in cui inizio l'elezione + delta (tipo 365 giorni)
+    """
     def issue_certificate_from_csr(
         self,
         csr: x509.CertificateSigningRequest,
@@ -219,23 +232,55 @@ class UniversityCA:
         subject_authenticated: bool = True,
     ) -> x509.Certificate:
         """
-        Il percorso di emissione realistico, quello che il Lab 4 consiglia
-        per terze parti: il soggetto genera la coppia e la CSR da solo con
+        il soggetto genera la coppia e la CSR da solo con
         `csr.create_csr`, la CA non vede mai la chiave privata. Qui
         autentico il soggetto e controllo che la CSR provi il possesso
         della chiave (altrimenti chiunque potrebbe chiedere un certificato
         per la chiave pubblica di qualcun altro), poi firmo con
         `_build_leaf_certificate`.
         """
+
+
+
+        """ Questa è la struttura della CSR quindi recupero il common name
+        CSR
+        ├── informazioni sul soggetto
+        │   ├── Common Name
+        │   └── Organization
+        │
+        ├── chiave pubblica del soggetto
+        │
+        └── firma del soggetto
+            └── dimostra il possesso della chiave privata
+        """
         common_name = csr.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value
         self._require_authenticated(common_name, subject_authenticated)
 
+
+        # Questa è proprio la Proof of Possession che mi serve Salvatò
+        # verifica che la CSR sia stata firmata correttamente utilizzando
+        # la chiave privata corrispondente alla chiave pubblica contenuta nella CSR.
+        """ Struttura per spiegare meglio
+            CSR
+             │
+             ├── public key
+             │
+             └── signature
+                   │
+                   ▼
+              verifica della firma
+                   │
+                   ├── OK → possiede la private key
+                   │
+                   └── NO → rifiuta
+        """
         if not csr_proves_key_possession(csr):
             raise ValueError(
                 f"CSR per '{common_name}' non valida: la firma non dimostra "
                 f"il possesso della chiave privata corrispondente."
             )
 
+        #faccio la stessa cosa prendendo l'organizzazione
         csr_organization = csr.subject.get_attributes_for_oid(NameOID.ORGANIZATION_NAME)
         if not csr_organization or csr_organization[0].value != self._organization_name:
             raise ValueError(
@@ -264,11 +309,10 @@ class UniversityCA:
         """
         Scorciatoia tenuta per compatibilità con test, demo e benchmark
         esistenti — per codice nuovo usare `issue_certificate_from_csr`.
-        Qui NON c'è nessuna proof-of-possession: se passi `public_key` la
+        Qui NON c'è una proof-of-possession vera e propria, nel nostro caso: se passi `public_key` la
         CA la certifica fidandosi e basta; se la ometti, la CA genera lei
-        stessa la coppia e ti ridà anche la privata, il che va bene per
-        un test ma sarebbe inaccettabile in un deployment vero (la CA non
-        deve mai maneggiare la chiave privata di qualcun altro).
+        stessa la coppia e ti ridà anche la privata, ma sarebbe sbagliato enlla vita reale perchè la CA non può prendere
+        la chiave privata altrui
         """
         self._require_authenticated(common_name, subject_authenticated)
 
@@ -295,7 +339,7 @@ class UniversityCA:
         return IssuedCertificate(certificate=certificate, private_key=subject_private_key)
 
     # ------------------------------------------------------------------ #
-    # Revoca e CRL — Lab 4
+    # Revoca e CRL
     # ------------------------------------------------------------------ #
 
     def revoke_certificate(
@@ -344,7 +388,7 @@ class UniversityCA:
     def countersign(self, payload: bytes) -> bytes:
         """
         Controfirma della CA su un digest già calcolato — serve al
-        manifest di elezione, che §2.4.3 vuole firmato "dai certificati
+        manifest di elezione, che nella sezione §2.4.3 deve essere firmato "dai certificati
         X.509 dei 5 commissari e dalla CA universitaria".
 
         È un metodo e non un accessore alla chiave privata di proposito:
@@ -361,7 +405,7 @@ class UniversityCA:
 
     def verify_certificate(self, certificate: x509.Certificate) -> bool:
         """
-        I 4 "Requirements" della slide 06 più la revoca del Lab 4:
+        I 4 "Requirements" che stanno nella teoria erano:
 
             R1. nome e chiave pubblica leggibili in chiaro — gratis, è il
                 formato X.509 stesso (cert.subject / cert.public_key()).
@@ -383,7 +427,7 @@ class UniversityCA:
         if not (certificate.not_valid_before_utc <= now <= certificate.not_valid_after_utc):
             return False
 
-        # R2 (pre-filtro) — l'issuer dichiarato deve essere questa CA
+        # R2 (pre-filtro) — l'issuer che vuole fare la revoca deve essere questa CA e non altri
         if certificate.issuer != self._certificate.subject:
             return False
 
@@ -399,7 +443,7 @@ class UniversityCA:
         except Exception:
             return False
 
-        # R5 — revoca (Lab 4)
+        # R5 — revoca come avevamo fatto nella prova pratica
         if self._store.is_revoked(certificate.serial_number):
             return False
 

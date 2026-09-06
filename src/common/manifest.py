@@ -221,7 +221,17 @@ def sign_manifest(
 
     payload = manifest.signed_payload()
     signatures = []
+    """
+    zip prende due liste iterabili e li mette insieme, ovvero commissioner_signing_keys = [key1, key2 ...] e certificates
+    [cert1, cert2...] quindi diventa[ (key1, cert1) ...], enumerate inserisce un contatore all'inizio quindi diventa:
+    [(1,(key1, cert1), ...] ad ogni ciclo devo spacchettare il valore per avere i valori singoli 
+    """
     for index, (key, certificate) in enumerate(zip(commissioner_signing_keys, manifest.commissioner_certificates), 1):
+        """
+        Per ogni coppia key.public_key e certificate.public_key
+        controlla che la chiave pubblica della chiave di firma 
+        sia uguale alla chiave pubblica contenuta nel certificato.
+        """
         if public_key_der(key.public_key()) != public_key_der(certificate.public_key()):
             raise ManifestSigningError(
                 f"la chiave del commissario in posizione {index} non corrisponde al certificato "
@@ -236,6 +246,11 @@ def sign_manifest(
     )
 
 
+
+"""
+Verifica la validità del manifest firmato utilizzando il certificato della CA,
+opzionalmente (perchè abbiamo messo None) controllando la CRL e usando una data/ora specifica per la verifica.
+"""
 def verify_manifest(
     signed: SignedElectionManifest,
     ca_certificate: x509.Certificate,
@@ -256,10 +271,10 @@ def verify_manifest(
          rispetto alla CA (F.1), Key Usage adeguata alla firma, e firma
          valida sul digest.
 
-    Il punto 4 richiede `digitalSignature` *e* `nonRepudiation` per la
+    Il punto 4 richiede `digitalSignature` e NON RIPUDIO per la
     stessa ragione spiegata in `verify_token_as_ballot_server`: il solo
     `digitalSignature` è acceso anche sui certificati TLS, quindi
-    accontentarsene accetterebbe un manifest firmato con una chiave di
+    se ci volessi "accontentare" accetterebbe un manifest firmato con una chiave di
     trasporto invece che con quella personale del commissario.
     """
     manifest = signed.manifest
@@ -276,8 +291,8 @@ def verify_manifest(
     if manifest.electorate_size < 0 or manifest.head_reference_tolerance < 1:
         return False
 
-    # 2. Una firma per commissario: §2.4.3 vuole la firma di tutti,
-    #    non di t come nel tally bundle.
+    # 2. Una firma per commissario: §2.4.3 vuole la firma di tutti perchè sul Manifest voglio che tutti lo accettino,
+    #    non di t, quindi threshold come nel tally bundle.
     if len(signed.commissioner_signatures) != len(manifest.commissioner_certificates):
         return False
 
@@ -291,10 +306,17 @@ def verify_manifest(
         return False
 
     # 4. Catena di fiducia e firma di ogni commissario.
+    """
+    Abbina:
+    certificato 1 alla firma 1 con zip  e poi controllo con il Certificate Revocation List
+    """
     for certificate, signature in zip(manifest.commissioner_certificates, signed.commissioner_signatures):
         if not verify_certificate_with_crl(certificate, ca_certificate, crl, now):
             return False
 
+        """
+        Controllo se nel certificato X.509 c'è l'uso della chiave altrimenti fallise il controllo
+        """
         try:
             key_usage = certificate.extensions.get_extension_for_class(x509.KeyUsage).value
         except x509.ExtensionNotFound:
@@ -315,7 +337,7 @@ def check_turnout_consistency(manifest: ElectionManifest, tokens_issued: int, ba
     """V.2 punto 9: confronto fra token emessi, schede registrate e
     cardinalità del corpo elettorale dichiarata nel manifest.
 
-    È il controllo che §2.3 indica come unica mitigazione (parziale)
+    È il controllo che abbiamo descritto in §2.3 dove l'unica mitigazione (parziale)
     dell'assunzione F.5 sulla correttezza del registro elettorale: non
     dimostra che il registro sia onesto, ma rende rilevabile il caso in
     cui i token emessi eccedano gli aventi diritto dichiarati prima

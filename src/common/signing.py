@@ -1,6 +1,6 @@
 """
 RSA hash-and-sign (PKCS#1 v1.5 + SHA-256), lo schema di firma che usa
-tutto il documento (§2.2.2, slide 05_Public_Key). Lo usano l'IdP per i
+tutto il documento (§2.2.2, mi pare in questo punto del documento). Lo usano l'IdP per i
 token, il Ballot Server per ricevute e teste del BB, i commissari per
 manifest e attestati — tutti richiamano queste due funzioni.
 

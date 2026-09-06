@@ -1,21 +1,17 @@
 """
-Revoca e CRL — Lab 4, "Certificate revocation lists".
+Revoca e CRL — "Certificate revocation lists".
 
 All'inizio avevo escluso la revoca dal progetto, pensando che con una
-finestra di voto così breve non servisse davvero. Rileggendo §2.4.2 mi
-sono accorto che era un errore: il documento dice esplicitamente che la
+finestra di voto così breve non servisse davvero. Però srebbe stato
+ un errore: il documento dice esplicitamente che la
 chiave elettorale dell'IdP "può essere revocata al termine senza impatti
-sui servizi di Ateneo", ed è proprio questo il motivo per cui è tenuta
-separata dalla chiave SSO. Senza revoca il prototipo non dimostra metà
-di quella scelta.
+sui servizi di Ateneo". Senza revoca il prototipo non dimostra metà
+di quello che viene richiesto.
 
-Il ciclo è quello del Lab: `openssl ca -revoke` (sta in store.py, che
+Il ciclo è quello del Lab che ci aveva fatto il Prof Mazzocca: `openssl ca -revoke` (sta in store.py, che
 possiede il database), `openssl ca -gencrl` (è `build_crl` qui sotto), e
 `crlDistributionPoints` nel certificato per dire dove trovarla.
-
-OCSP l'ho lasciato fuori: per un pugno di certificati elettorali, senza
-browser coinvolti, un responder online sarebbe solo un altro single
-point of failure. Una CRL firmata, pubblicata col manifest, basta ed è
+Una CRL firmata, pubblicata col manifest, basta ed è
 verificabile offline.
 """
 from __future__ import annotations
@@ -58,7 +54,7 @@ def build_crl(
 ) -> x509.CertificateRevocationList:
     """
     Emette la CRL firmata (`openssl ca -gencrl`). Le voci vengono dalle
-    righe `R` di `index.txt`: la CRL è solo una foto firmata del database
+    righe `R` di `index.txt`: la CRL è solo una "foto" firmata del database
     in quel momento, per questo va rigenerata dopo ogni revoca, non prima.
 
     `crl_number` cresce ad ogni CRL emessa, così un verificatore si accorge
@@ -97,10 +93,13 @@ def build_crl(
     return builder.sign(signing_key, hashes.SHA256())
 
 
+# mi serve per capire se la crl è effettivamente corretta o meno quindi controllo la firma se è adeguata
 def crl_is_authentic(crl: x509.CertificateRevocationList, ca_public_key: RSAPublicKey) -> bool:
-    """Verifica la firma della CA sulla CRL: senza questo controllo,
+    """senza questo controllo,
     chiunque riesca a sostituire il file servito dal distribution point
-    potrebbe far sparire una revoca semplicemente togliendola dalla lista."""
+    potrebbe far sparire una revoca semplicemente togliendola dalla lista.
+    Non so se è "esagerato" come controllo ma sicuramente è utile
+    """
     return crl.is_signature_valid(ca_public_key)
 
 

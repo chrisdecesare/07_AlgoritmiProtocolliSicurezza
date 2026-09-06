@@ -6,15 +6,15 @@ server_cert, usr_cert); qui ogni sezione diventa un `ExtensionProfile`
 con gli stessi flag, così la CA si limita a selezionarlo invece di
 costruire le estensioni inline ogni volta.
 
-Manca `v3_intermediate_ca` di proposito: il Lab usa una CA a due livelli
-(root + intermedia), ma §2.3 assume una sola CA di Ateneo, quindi
+Salvatore ntoa che rispetto al Lab del professore che usa una CA a due livelli
+(root + intermedia), noi nella sezione §2.3 assumiamo una sola CA di Ateneo, quindi
 aggiungere un'intermedia vorrebbe dire inventare fiducia che il documento
 non prevede.
 
 Ho anche aggiunto un profilo che il Lab non ha, `signing_cert`: le
 chiavi di firma di IdP e BS non devono mai cifrare nulla, quindi è
 `usr_cert` meno `keyEncipherment` — l'unica differenza dal laboratorio,
-e va nella direzione più restrittiva, non il contrario.
+e dovrebbe essere più restrittiva
 """
 from __future__ import annotations
 
@@ -41,7 +41,8 @@ class EntityRole(enum.Enum):
 class ExtensionProfile:
     """Una sezione di `openssl.cnf`, come dato invece che come voce di
     file. `name` è il nome della sezione originale, giusto per poter
-    risalire a quale parte del .cnf del Lab corrisponde."""
+    risalire a quale parte del .cnf del Lab corrisponde.
+    """
 
     name: str
     basic_constraints: x509.BasicConstraints

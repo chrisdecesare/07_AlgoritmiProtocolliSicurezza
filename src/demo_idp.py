@@ -13,6 +13,17 @@ Uso: PYTHONPATH=. python3 -m src.demo_idp
 """
 from __future__ import annotations
 
+import sys
+
+# Forza stdout/stderr a UTF-8: su Windows la console (cp1252) non sa
+# codificare i simboli usati nella notazione del protocollo (σ, ∥, ...)
+# che possono comparire nei messaggi di errore.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8")
+    except (AttributeError, ValueError):
+        pass
+
 from src.ca.root_ca import EntityRole, UniversityCA
 from src.common.hashing import sha256
 from src.common.keys import generate_rsa_keypair
@@ -86,18 +97,27 @@ def main() -> None:
     print(f"[IdP] Token emesso: token_id={token.token_id.hex()}  firma valida={idp.verify_token(token)}")
 
     # 4. Un secondo token per la stessa matricola viene rifiutato (I.2).
-    print(f"\n[Elettore {matricola}] Tenta di richiedere un secondo token...")
+    print(
+        f"\n[ATTACCANTE - DOUBLE TOKEN REQUEST] L'elettore {matricola} (o chi ne ha "
+        "rubato la sessione) tenta di farsi emettere un secondo token dopo averne "
+        "gia' ricevuto uno, nel tentativo di ottenere due possibilita' di voto. "
+        "Proprieta' attaccata: unicita' (I.2)..."
+    )
     salt, nonce = idp.start_authentication(matricola)
     idp.verify_authentication(matricola, client_response(salt, nonce, students[matricola]))
     try:
         idp.issue_token(matricola, generate_rsa_keypair().public_key())
         print("  ERRORE: il secondo token non doveva essere emesso!")
     except TokenAlreadyIssuedError as exc:
-        print(f"  Rifiutato correttamente (I.2): {exc}")
+        print(f"  Rifiutato correttamente - unicita' preservata (I.2): {exc}")
 
     # 5. Rate limiting: 3 password sbagliate consecutive per un altro studente.
     victim = "0522500002"
-    print(f"\n[Attaccante] 3 tentativi di password sbagliata su {victim}...")
+    print(
+        f"\n[ATTACCANTE - BRUTE FORCE] 3 tentativi consecutivi di password errata "
+        f"sulla matricola {victim}, nel tentativo di indovinarne le credenziali per "
+        "autenticazione. Proprieta' attaccata: resistenza al brute-force (§2.5.1)..."
+    )
     for i in range(3):
         salt, nonce = idp.start_authentication(victim)
         idp.verify_authentication(victim, client_response(salt, nonce, f"tentativo-{i}"))
@@ -105,7 +125,7 @@ def main() -> None:
         idp.start_authentication(victim)
         print("  ERRORE: l'IdP doveva bloccare la matricola dopo 3 fallimenti!")
     except RateLimitedError as exc:
-        print(f"  Bloccato correttamente (§2.5.1): {exc}")
+        print(f"  Bloccato correttamente - rate limit scattato (§2.5.1): {exc}")
 
     # 6. Chiusura urne: lo studente 0522500003 non vota mai (astenuto).
     print("\n" + "-" * 78)
